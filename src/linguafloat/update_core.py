@@ -172,6 +172,16 @@ def fetch_bytes(client, url: str, *, limit: int = 512 * 1024) -> bytes:
         return b"".join(parts)
 
 
+def _check_signed_latest(client, channel: dict, current: str) -> Release | None:
+    # Public release assets have their own delivery endpoint. Respect the API
+    # backoff while still checking publisher-authenticated stable metadata.
+    base = f"https://github.com/{channel['repository']}/releases/latest/download/"
+    payload = fetch_bytes(client, base + "update.json")
+    signature = fetch_bytes(client, base + "update.json.sig", limit=4096)
+    release = parse_manifest(payload, signature, channel, current)
+    return release if Version(release.version) > Version(current) else None
+
+
 def check_latest(client, channel: dict, current: str, cache: Path, *, now: float | None = None) -> Release | None:
     now = time.time() if now is None else now
     try:
@@ -179,7 +189,7 @@ def check_latest(client, channel: dict, current: str, cache: Path, *, now: float
     except (OSError, ValueError):
         state = {}
     if now < state.get("retry_after", 0):
-        raise UpdateError("GitHub 正在限流，请稍后重试。")
+        return _check_signed_latest(client, channel, current)
     endpoint = f"https://api.github.com/repos/{channel['repository']}/releases/latest"
     headers = {"Accept": "application/vnd.github+json"}
     if state.get("etag") and state.get("repository") == channel["repository"]:
@@ -194,6 +204,7 @@ def check_latest(client, channel: dict, current: str, cache: Path, *, now: float
             until, delay = 0, 60
         state["retry_after"] = min(now + 3600, max(now + max(delay, 60), until))
         atomic_json(cache, state)
+        return _check_signed_latest(client, channel, current)
     if response.status_code == 304 and state.get("payload") and state.get("signature"):
         release = parse_manifest(base64.b64decode(state["payload"]), state["signature"].encode(), channel, current)
         return release if Version(release.version) > Version(current) else None

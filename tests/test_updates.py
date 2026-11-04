@@ -71,15 +71,44 @@ def test_failed_checks_are_not_reported_as_latest(signed, tmp_path, status):
     channel = signed[2]
     count = []
     def respond(request):
-        count.append(1)
+        count.append(request.url.host)
         return httpx.Response(status, headers={"Retry-After": "90"})
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(core.UpdateError):
             core.check_latest(client, channel, "0.11.0", tmp_path / "cache.json", now=100)
         if status in (403, 429):
-            with pytest.raises(core.UpdateError, match="限流"):
+            api_count = len([r for r in count if r == "api.github.com"])
+            with pytest.raises(core.UpdateError):
                 core.check_latest(client, channel, "0.11.0", tmp_path / "cache.json", now=110)
-            assert len(count) == 1
+            assert len([r for r in count if r == "api.github.com"]) == api_count
+
+
+def test_limited_api_uses_signed_public_assets_without_repeating_api(signed, tmp_path):
+    payload, signature, channel = signed
+    calls = []
+    def respond(request):
+        calls.append(request)
+        if request.url.host == "api.github.com":
+            return httpx.Response(403, headers={"Retry-After": "120"})
+        assert request.url.path.startswith("/example/releases/releases/latest/download/")
+        return httpx.Response(200, content=signature if request.url.path.endswith(".sig") else payload)
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        cache = tmp_path / "check.json"
+        assert core.check_latest(client, channel, "0.11.0", cache, now=100).version == "0.12.0"
+        assert core.check_latest(client, channel, "0.11.0", cache, now=110).version == "0.12.0"
+    assert sum(r.url.host == "api.github.com" for r in calls) == 1
+    assert len(calls) == 5
+
+
+def test_limited_api_never_accepts_tampered_fallback(signed, tmp_path):
+    payload, signature, channel = signed
+    def respond(request):
+        if request.url.host == "api.github.com":
+            return httpx.Response(429)
+        return httpx.Response(200, content=signature if request.url.path.endswith(".sig") else payload.replace(b"0.12.0", b"0.99.0"))
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(core.UpdateError, match="签名"):
+            core.check_latest(client, channel, "0.11.0", tmp_path / "check.json")
 
 
 def package(tmp_path, *, extra=None, version="0.12.0"):
