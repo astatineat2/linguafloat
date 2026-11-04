@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "linguafloat"
+version = "0.11.0"
+description = "A Windows selection translator with a floating result window."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+dependencies = [
+    "packaging>=24,<27",
+    "keyring>=25.6",
+    "openai>=1.68,<3",
+    "pynput>=1.7.7",
+    "PySide6>=6.8.2",
+    "qtawesome>=1.4,<2",
+    "rapidocr==3.9.2",
+    "onnxruntime>=1.20,<2",
+    "tomli-w>=1.2",
+    "striprtf>=0.0.29,<1",
+    "uiautomation>=2.0.29; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.12",
+    "pytest>=8.3",
+]
+
+[project.scripts]
+linguafloat = "linguafloat.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/linguafloat"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

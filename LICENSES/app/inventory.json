@@ -1,0 +1,885 @@
+[
+  {
+    "name": "altgraph",
+    "version": "0.17.5",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "altgraph\\LICENSE"
+    ],
+    "project_urls": [
+      "Documentation, https://altgraph.readthedocs.io/en/latest/",
+      "Issue tracker, https://github.com/ronaldoussoren/altgraph/issues",
+      "Repository, https://github.com/ronaldoussoren/altgraph"
+    ]
+  },
+  {
+    "name": "annotated-types",
+    "version": "0.8.0",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "annotated-types\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Homepage, https://github.com/annotated-types/annotated-types",
+      "Source, https://github.com/annotated-types/annotated-types",
+      "Changelog, https://github.com/annotated-types/annotated-types/releases"
+    ]
+  },
+  {
+    "name": "antlr4-python3-runtime",
+    "version": "4.9.3",
+    "license_expression": "",
+    "declared_license": "BSD",
+    "license_files": [],
+    "project_urls": []
+  },
+  {
+    "name": "anyio",
+    "version": "4.15.1",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "anyio\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Documentation, https://anyio.readthedocs.io/en/latest/",
+      "Changelog, https://anyio.readthedocs.io/en/stable/versionhistory.html",
+      "Source code, https://github.com/agronholm/anyio",
+      "Issue tracker, https://github.com/agronholm/anyio/issues"
+    ]
+  },
+  {
+    "name": "certifi",
+    "version": "2026.7.22",
+    "license_expression": "",
+    "declared_license": "MPL-2.0",
+    "license_files": [
+      "certifi\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Source, https://github.com/certifi/python-certifi"
+    ]
+  },
+  {
+    "name": "charset-normalizer",
+    "version": "3.5.1",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "charset-normalizer\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Changelog, https://github.com/jawah/charset_normalizer/blob/master/CHANGELOG.md",
+      "Documentation, https://charset-normalizer.readthedocs.io/",
+      "Code, https://github.com/jawah/charset_normalizer",
+      "Issue tracker, https://github.com/jawah/charset_normalizer/issues"
+    ]
+  },
+  {
+    "name": "colorama",
+    "version": "0.4.6",
+    "license_expression": "",
+    "declared_license": "",
+    "license_files": [
+      "colorama\\licenses\\LICENSE.txt"
+    ],
+    "project_urls": [
+      "Homepage, https://github.com/tartley/colorama"
+    ]
+  },
+  {
+    "name": "colorlog",
+    "version": "6.12.0",
+    "license_expression": "",
+    "declared_license": "MIT License",
+    "license_files": [
+      "colorlog\\licenses\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "comtypes",
+    "version": "1.4.16",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "comtypes\\licenses\\LICENSE.txt"
+    ],
+    "project_urls": [
+      "Source, https://github.com/enthought/comtypes",
+      "Download, https://github.com/enthought/comtypes/releases",
+      "Issues, https://github.com/enthought/comtypes/issues"
+    ]
+  },
+  {
+    "name": "distro",
+    "version": "1.9.0",
+    "license_expression": "",
+    "declared_license": "Apache License, Version 2.0",
+    "license_files": [
+      "distro\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "flatbuffers",
+    "version": "25.12.19",
+    "license_expression": "",
+    "declared_license": "Apache 2.0",
+    "license_files": [],
+    "project_urls": [
+      "Documentation, https://google.github.io/flatbuffers/",
+      "Source, https://github.com/google/flatbuffers"
+    ]
+  },
+  {
+    "name": "h11",
+    "version": "0.16.0",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "h11\\licenses\\LICENSE.txt"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "httpcore",
+    "version": "1.0.9",
+    "license_expression": "BSD-3-Clause",
+    "declared_license": "",
+    "license_files": [
+      "httpcore\\licenses\\LICENSE.md"
+    ],
+    "project_urls": [
+      "Documentation, https://www.encode.io/httpcore",
+      "Homepage, https://www.encode.io/httpcore/",
+      "Source, https://github.com/encode/httpcore"
+    ]
+  },
+  {
+    "name": "httpx",
+    "version": "0.28.1",
+    "license_expression": "",
+    "declared_license": "BSD-3-Clause",
+    "license_files": [
+      "httpx\\licenses\\LICENSE.md"
+    ],
+    "project_urls": [
+      "Changelog, https://github.com/encode/httpx/blob/master/CHANGELOG.md",
+      "Documentation, https://www.python-httpx.org",
+      "Homepage, https://github.com/encode/httpx",
+      "Source, https://github.com/encode/httpx"
+    ]
+  },
+  {
+    "name": "idna",
+    "version": "3.19",
+    "license_expression": "BSD-3-Clause",
+    "declared_license": "",
+    "license_files": [
+      "idna\\licenses\\LICENSE.md"
+    ],
+    "project_urls": [
+      "Changelog, https://github.com/kjd/idna/blob/master/HISTORY.md",
+      "Issue tracker, https://github.com/kjd/idna/issues",
+      "Source, https://github.com/kjd/idna"
+    ]
+  },
+  {
+    "name": "iniconfig",
+    "version": "2.3.0",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "iniconfig\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Homepage, https://github.com/pytest-dev/iniconfig"
+    ]
+  },
+  {
+    "name": "jaraco.classes",
+    "version": "3.4.0",
+    "license_expression": "",
+    "declared_license": "",
+    "license_files": [
+      "jaraco.classes\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "jaraco.context",
+    "version": "6.1.2",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "jaraco.context\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Source, https://github.com/jaraco/jaraco.context"
+    ]
+  },
+  {
+    "name": "jaraco.functools",
+    "version": "4.6.0",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "jaraco.functools\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Source, https://github.com/jaraco/jaraco.functools"
+    ]
+  },
+  {
+    "name": "jiter",
+    "version": "0.16.0",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "jiter\\licenses\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "keyring",
+    "version": "25.7.0",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "keyring\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Source, https://github.com/jaraco/keyring"
+    ]
+  },
+  {
+    "name": "more-itertools",
+    "version": "11.1.0",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "more-itertools\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Documentation, https://more-itertools.readthedocs.io/en/stable/",
+      "Homepage, https://github.com/more-itertools/more-itertools"
+    ]
+  },
+  {
+    "name": "numpy",
+    "version": "2.5.3",
+    "license_expression": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+    "declared_license": "",
+    "license_files": [
+      "numpy\\licenses\\LICENSE.txt",
+      "numpy\\licenses\\numpy\\_core\\include\\numpy\\libdivide\\LICENSE.txt",
+      "numpy\\licenses\\numpy\\_core\\src\\common\\pythoncapi-compat\\COPYING",
+      "numpy\\licenses\\numpy\\_core\\src\\highway\\LICENSE",
+      "numpy\\licenses\\numpy\\_core\\src\\multiarray\\dragon4_LICENSE.txt",
+      "numpy\\licenses\\numpy\\_core\\src\\npysort\\x86-simd-sort\\LICENSE.md",
+      "numpy\\licenses\\numpy\\_core\\src\\umath\\svml\\LICENSE",
+      "numpy\\licenses\\numpy\\fft\\pocketfft\\LICENSE.md",
+      "numpy\\licenses\\numpy\\linalg\\lapack_lite\\LICENSE.txt",
+      "numpy\\licenses\\numpy\\ma\\LICENSE",
+      "numpy\\licenses\\numpy\\random\\LICENSE.md",
+      "numpy\\licenses\\numpy\\random\\src\\distributions\\LICENSE.md",
+      "numpy\\licenses\\numpy\\random\\src\\mt19937\\LICENSE.md",
+      "numpy\\licenses\\numpy\\random\\src\\pcg64\\LICENSE.md",
+      "numpy\\licenses\\numpy\\random\\src\\philox\\LICENSE.md",
+      "numpy\\licenses\\numpy\\random\\src\\sfc64\\LICENSE.md",
+      "numpy\\licenses\\numpy\\random\\src\\splitmix64\\LICENSE.md",
+      "numpy\\_core\\include\\numpy\\random\\LICENSE.txt",
+      "numpy\\ma\\LICENSE",
+      "numpy\\random\\LICENSE.md"
+    ],
+    "project_urls": [
+      "homepage, https://numpy.org",
+      "documentation, https://numpy.org/doc/",
+      "source, https://github.com/numpy/numpy",
+      "download, https://pypi.org/project/numpy/#files",
+      "tracker, https://github.com/numpy/numpy/issues",
+      "release notes, https://numpy.org/doc/stable/release"
+    ]
+  },
+  {
+    "name": "omegaconf",
+    "version": "2.3.1",
+    "license_expression": "",
+    "declared_license": "",
+    "license_files": [
+      "omegaconf\\licenses\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "onnxruntime",
+    "version": "1.30.0",
+    "license_expression": "",
+    "declared_license": "MIT License",
+    "license_files": [
+      "onnxruntime\\LICENSE",
+      "onnxruntime\\ThirdPartyNotices.txt"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "openai",
+    "version": "2.54.0",
+    "license_expression": "",
+    "declared_license": "Apache-2.0",
+    "license_files": [
+      "openai\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Homepage, https://github.com/openai/openai-python",
+      "Repository, https://github.com/openai/openai-python"
+    ]
+  },
+  {
+    "name": "opencv-python",
+    "version": "5.0.0.93",
+    "license_expression": "",
+    "declared_license": "Apache 2.0",
+    "license_files": [
+      "opencv-python\\LICENSE.txt",
+      "opencv-python\\LICENSE.txt"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "packaging",
+    "version": "26.3",
+    "license_expression": "Apache-2.0 OR BSD-2-Clause",
+    "declared_license": "",
+    "license_files": [
+      "packaging\\licenses\\LICENSE",
+      "packaging\\licenses\\LICENSE.APACHE",
+      "packaging\\licenses\\LICENSE.BSD"
+    ],
+    "project_urls": [
+      "Documentation, https://packaging.pypa.io/",
+      "Source, https://github.com/pypa/packaging"
+    ]
+  },
+  {
+    "name": "pefile",
+    "version": "2024.8.26",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "pefile\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "pillow",
+    "version": "12.3.0",
+    "license_expression": "MIT-CMU",
+    "declared_license": "",
+    "license_files": [
+      "pillow\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Release notes, https://pillow.readthedocs.io/en/stable/releasenotes/index.html",
+      "Changelog, https://github.com/python-pillow/Pillow/releases",
+      "Documentation, https://pillow.readthedocs.io",
+      "Funding, https://tidelift.com/subscription/pkg/pypi-pillow?utm_source=pypi-pillow&utm_medium=pypi",
+      "Homepage, https://python-pillow.github.io",
+      "Mastodon, https://fosstodon.org/@pillow",
+      "Source, https://github.com/python-pillow/Pillow"
+    ]
+  },
+  {
+    "name": "pip",
+    "version": "26.2.1",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "pip\\licenses\\AUTHORS.txt",
+      "pip\\licenses\\LICENSE.txt",
+      "pip\\licenses\\src\\pip\\_vendor\\cachecontrol\\LICENSE.txt",
+      "pip\\licenses\\src\\pip\\_vendor\\certifi\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\distlib\\LICENSE.txt",
+      "pip\\licenses\\src\\pip\\_vendor\\distro\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\idna\\LICENSE.md",
+      "pip\\licenses\\src\\pip\\_vendor\\msgpack\\COPYING",
+      "pip\\licenses\\src\\pip\\_vendor\\packaging\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\packaging\\LICENSE.APACHE",
+      "pip\\licenses\\src\\pip\\_vendor\\packaging\\LICENSE.BSD",
+      "pip\\licenses\\src\\pip\\_vendor\\pkg_resources\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\platformdirs\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\pygments\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\pyproject_hooks\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\requests\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\resolvelib\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\rich\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\tomli\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\tomli_w\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\truststore\\LICENSE",
+      "pip\\licenses\\src\\pip\\_vendor\\urllib3\\LICENSE.txt",
+      "pip\\_vendor\\cachecontrol\\LICENSE.txt",
+      "pip\\_vendor\\certifi\\LICENSE",
+      "pip\\_vendor\\distlib\\LICENSE.txt",
+      "pip\\_vendor\\distro\\LICENSE",
+      "pip\\_vendor\\idna\\LICENSE.md",
+      "pip\\_vendor\\msgpack\\COPYING",
+      "pip\\_vendor\\packaging\\LICENSE",
+      "pip\\_vendor\\pkg_resources\\LICENSE",
+      "pip\\_vendor\\platformdirs\\LICENSE",
+      "pip\\_vendor\\pygments\\LICENSE",
+      "pip\\_vendor\\pyproject_hooks\\LICENSE",
+      "pip\\_vendor\\requests\\LICENSE",
+      "pip\\_vendor\\resolvelib\\LICENSE",
+      "pip\\_vendor\\rich\\LICENSE",
+      "pip\\_vendor\\tomli\\LICENSE",
+      "pip\\_vendor\\tomli_w\\LICENSE",
+      "pip\\_vendor\\truststore\\LICENSE",
+      "pip\\_vendor\\urllib3\\LICENSE.txt"
+    ],
+    "project_urls": [
+      "Changelog, https://pip.pypa.io/en/stable/news/",
+      "Documentation, https://pip.pypa.io",
+      "Homepage, https://pip.pypa.io/",
+      "Source, https://github.com/pypa/pip"
+    ]
+  },
+  {
+    "name": "pluggy",
+    "version": "1.6.0",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "pluggy\\licenses\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "protobuf",
+    "version": "7.36.1",
+    "license_expression": "",
+    "declared_license": "3-Clause BSD License",
+    "license_files": [
+      "protobuf\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "pyclipper",
+    "version": "1.4.0",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "pyclipper\\licenses\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "pydantic",
+    "version": "2.13.5",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "pydantic\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Homepage, https://github.com/pydantic/pydantic",
+      "Documentation, https://docs.pydantic.dev",
+      "Funding, https://github.com/sponsors/samuelcolvin",
+      "Source, https://github.com/pydantic/pydantic",
+      "Changelog, https://docs.pydantic.dev/latest/changelog/"
+    ]
+  },
+  {
+    "name": "pydantic_core",
+    "version": "2.46.5",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "pydantic_core\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Funding, https://github.com/sponsors/samuelcolvin",
+      "Homepage, https://github.com/pydantic",
+      "Source, https://github.com/pydantic/pydantic/tree/main/pydantic-core"
+    ]
+  },
+  {
+    "name": "Pygments",
+    "version": "2.21.0",
+    "license_expression": "BSD-2-Clause",
+    "declared_license": "",
+    "license_files": [
+      "Pygments\\licenses\\AUTHORS",
+      "Pygments\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Homepage, https://pygments.org",
+      "Documentation, https://pygments.org/docs",
+      "Source, https://github.com/pygments/pygments",
+      "Bug Tracker, https://github.com/pygments/pygments/issues",
+      "Changelog, https://github.com/pygments/pygments/blob/master/CHANGES"
+    ]
+  },
+  {
+    "name": "pyinstaller",
+    "version": "6.22.2",
+    "license_expression": "",
+    "declared_license": "GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones)",
+    "license_files": [
+      "pyinstaller\\licenses\\COPYING.txt"
+    ],
+    "project_urls": [
+      "Homepage, https://pyinstaller.org",
+      "Documentation, https://pyinstaller.org",
+      "Source Code, https://github.com/pyinstaller/pyinstaller",
+      "Release Notes, https://pyinstaller.org/en/stable/CHANGES.html"
+    ]
+  },
+  {
+    "name": "pyinstaller-hooks-contrib",
+    "version": "2026.7",
+    "license_expression": "",
+    "declared_license": "",
+    "license_files": [
+      "pyinstaller-hooks-contrib\\licenses\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "pynput",
+    "version": "1.8.2",
+    "license_expression": "",
+    "declared_license": "LGPLv3",
+    "license_files": [
+      "pynput\\licenses\\COPYING.LGPL"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "PySide6",
+    "version": "6.11.2",
+    "license_expression": "",
+    "declared_license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+    "license_files": [
+      "PySide6\\licenses\\LicenseRef-Qt-Commercial.txt"
+    ],
+    "project_urls": [
+      "Homepage, https://pyside.org",
+      "Documentation, https://doc.qt.io/qtforpython",
+      "Repository, https://code.qt.io/cgit/pyside/pyside-setup.git/",
+      "Changelog, https://code.qt.io/cgit/pyside/pyside-setup.git/tree/doc/changelogs",
+      "Tracker, https://qt-project.atlassian.net/browse/PYSIDE"
+    ]
+  },
+  {
+    "name": "PySide6_Addons",
+    "version": "6.11.2",
+    "license_expression": "",
+    "declared_license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+    "license_files": [
+      "PySide6_Addons\\licenses\\LicenseRef-Qt-Commercial.txt"
+    ],
+    "project_urls": [
+      "Homepage, https://pyside.org",
+      "Documentation, https://doc.qt.io/qtforpython",
+      "Repository, https://code.qt.io/cgit/pyside/pyside-setup.git/",
+      "Changelog, https://code.qt.io/cgit/pyside/pyside-setup.git/tree/doc/changelogs",
+      "Tracker, https://qt-project.atlassian.net/browse/PYSIDE"
+    ]
+  },
+  {
+    "name": "PySide6_Essentials",
+    "version": "6.11.2",
+    "license_expression": "",
+    "declared_license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+    "license_files": [
+      "PySide6_Essentials\\licenses\\LicenseRef-Qt-Commercial.txt"
+    ],
+    "project_urls": [
+      "Homepage, https://pyside.org",
+      "Documentation, https://doc.qt.io/qtforpython",
+      "Repository, https://code.qt.io/cgit/pyside/pyside-setup.git/",
+      "Changelog, https://code.qt.io/cgit/pyside/pyside-setup.git/tree/doc/changelogs",
+      "Tracker, https://qt-project.atlassian.net/browse/PYSIDE"
+    ]
+  },
+  {
+    "name": "pytest",
+    "version": "9.1.1",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "pytest\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Changelog, https://docs.pytest.org/en/stable/changelog.html",
+      "Contact, https://docs.pytest.org/en/stable/contact.html",
+      "Funding, https://docs.pytest.org/en/stable/sponsor.html",
+      "Homepage, https://docs.pytest.org/en/latest/",
+      "Source, https://github.com/pytest-dev/pytest",
+      "Tracker, https://github.com/pytest-dev/pytest/issues"
+    ]
+  },
+  {
+    "name": "pywin32-ctypes",
+    "version": "0.2.3",
+    "license_expression": "",
+    "declared_license": "BSD-3-Clause",
+    "license_files": [
+      "pywin32-ctypes\\LICENSE.txt"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "PyYAML",
+    "version": "6.0.3",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "PyYAML\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Bug Tracker, https://github.com/yaml/pyyaml/issues",
+      "CI, https://github.com/yaml/pyyaml/actions",
+      "Documentation, https://pyyaml.org/wiki/PyYAMLDocumentation",
+      "Mailing lists, http://lists.sourceforge.net/lists/listinfo/yaml-core",
+      "Source Code, https://github.com/yaml/pyyaml"
+    ]
+  },
+  {
+    "name": "QtAwesome",
+    "version": "1.4.2",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "QtAwesome\\licenses\\LICENSE.txt"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "QtPy",
+    "version": "2.4.3",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "QtPy\\LICENSE.txt"
+    ],
+    "project_urls": [
+      "Github, https://github.com/spyder-ide/qtpy",
+      "Bug Tracker, https://github.com/spyder-ide/qtpy/issues",
+      "Parent Project, https://www.spyder-ide.org/"
+    ]
+  },
+  {
+    "name": "rapidocr",
+    "version": "3.9.2",
+    "license_expression": "Apache-2.0",
+    "declared_license": "",
+    "license_files": [],
+    "project_urls": [
+      "Documentation, https://rapidai.github.io/RapidOCRDocs",
+      "Changelog, https://github.com/RapidAI/RapidOCR/releases"
+    ]
+  },
+  {
+    "name": "requests",
+    "version": "2.34.2",
+    "license_expression": "",
+    "declared_license": "Apache-2.0",
+    "license_files": [
+      "requests\\licenses\\LICENSE",
+      "requests\\licenses\\NOTICE"
+    ],
+    "project_urls": [
+      "Documentation, https://requests.readthedocs.io",
+      "Source, https://github.com/psf/requests"
+    ]
+  },
+  {
+    "name": "setuptools",
+    "version": "84.0.0",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "setuptools\\licenses\\LICENSE",
+      "setuptools\\_vendor\\autocommand-2.2.2.dist-info\\LICENSE",
+      "setuptools\\_vendor\\backports.tarfile-1.2.0.dist-info\\LICENSE",
+      "setuptools\\_vendor\\importlib_metadata-8.7.1.dist-info\\licenses\\LICENSE",
+      "setuptools\\_vendor\\jaraco.text-4.0.0.dist-info\\LICENSE",
+      "setuptools\\_vendor\\jaraco_context-6.1.0.dist-info\\licenses\\LICENSE",
+      "setuptools\\_vendor\\jaraco_functools-4.4.0.dist-info\\licenses\\LICENSE",
+      "setuptools\\_vendor\\more_itertools-10.8.0.dist-info\\licenses\\LICENSE",
+      "setuptools\\_vendor\\packaging-26.0.dist-info\\licenses\\LICENSE",
+      "setuptools\\_vendor\\packaging-26.0.dist-info\\licenses\\LICENSE.APACHE",
+      "setuptools\\_vendor\\packaging-26.0.dist-info\\licenses\\LICENSE.BSD",
+      "setuptools\\_vendor\\platformdirs-4.4.0.dist-info\\licenses\\LICENSE",
+      "setuptools\\_vendor\\tomli-2.4.0.dist-info\\licenses\\LICENSE",
+      "setuptools\\_vendor\\wheel-0.46.3.dist-info\\licenses\\LICENSE.txt",
+      "setuptools\\_vendor\\zipp-3.23.0.dist-info\\licenses\\LICENSE",
+      "setuptools\\config\\NOTICE",
+      "setuptools\\config\\_validate_pyproject\\NOTICE"
+    ],
+    "project_urls": [
+      "Source, https://github.com/pypa/setuptools",
+      "Documentation, https://setuptools.pypa.io/",
+      "Changelog, https://setuptools.pypa.io/en/stable/history.html"
+    ]
+  },
+  {
+    "name": "shapely",
+    "version": "2.1.2",
+    "license_expression": "",
+    "declared_license": "BSD 3-Clause",
+    "license_files": [
+      "shapely\\licenses\\LICENSE.txt",
+      "shapely\\licenses\\LICENSE_GEOS",
+      "shapely\\licenses\\LICENSE_win32"
+    ],
+    "project_urls": [
+      "Documentation, https://shapely.readthedocs.io/",
+      "Repository, https://github.com/shapely/shapely"
+    ]
+  },
+  {
+    "name": "shiboken6",
+    "version": "6.11.2",
+    "license_expression": "",
+    "declared_license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+    "license_files": [
+      "shiboken6\\licenses\\LicenseRef-Qt-Commercial.txt"
+    ],
+    "project_urls": [
+      "Homepage, https://pyside.org",
+      "Documentation, https://doc.qt.io/qtforpython",
+      "Repository, https://code.qt.io/cgit/pyside/pyside-setup.git/",
+      "Changelog, https://code.qt.io/cgit/pyside/pyside-setup.git/tree/doc/changelogs",
+      "Tracker, https://qt-project.atlassian.net/browse/PYSIDE"
+    ]
+  },
+  {
+    "name": "six",
+    "version": "1.17.0",
+    "license_expression": "",
+    "declared_license": "MIT",
+    "license_files": [
+      "six\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "sniffio",
+    "version": "1.3.1",
+    "license_expression": "",
+    "declared_license": "MIT OR Apache-2.0",
+    "license_files": [
+      "sniffio\\LICENSE"
+    ],
+    "project_urls": [
+      "Homepage, https://github.com/python-trio/sniffio",
+      "Documentation, https://sniffio.readthedocs.io/",
+      "Changelog, https://sniffio.readthedocs.io/en/latest/history.html"
+    ]
+  },
+  {
+    "name": "striprtf",
+    "version": "0.0.33",
+    "license_expression": "BSD-3-Clause",
+    "declared_license": "",
+    "license_files": [
+      "striprtf\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Homepage, https://github.com/joshy/striprtf",
+      "Repository, https://github.com/joshy/striprtf.git",
+      "Download, https://github.com/joshy/striprtf/archive/v{version}.tar.gz"
+    ]
+  },
+  {
+    "name": "tomli_w",
+    "version": "1.2.0",
+    "license_expression": "",
+    "declared_license": "",
+    "license_files": [
+      "tomli_w\\LICENSE"
+    ],
+    "project_urls": [
+      "Changelog, https://github.com/hukkin/tomli-w/blob/master/CHANGELOG.md",
+      "Homepage, https://github.com/hukkin/tomli-w"
+    ]
+  },
+  {
+    "name": "tqdm",
+    "version": "4.70.1",
+    "license_expression": "",
+    "declared_license": "MPL-2.0 AND MIT",
+    "license_files": [
+      "tqdm\\licenses\\LICENCE"
+    ],
+    "project_urls": [
+      "homepage, https://tqdm.github.io",
+      "repository, https://github.com/tqdm/tqdm",
+      "changelog, https://tqdm.github.io/releases",
+      "wiki, https://github.com/tqdm/tqdm/wiki"
+    ]
+  },
+  {
+    "name": "typing-inspection",
+    "version": "0.4.4",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "typing-inspection\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Homepage, https://github.com/pydantic/typing-inspection",
+      "Documentation, https://pydantic.github.io/typing-inspection/dev/",
+      "Source, https://github.com/pydantic/typing-inspection",
+      "Changelog, https://github.com/pydantic/typing-inspection/blob/main/HISTORY.md"
+    ]
+  },
+  {
+    "name": "typing_extensions",
+    "version": "4.16.0",
+    "license_expression": "PSF-2.0",
+    "declared_license": "",
+    "license_files": [
+      "typing_extensions\\licenses\\LICENSE"
+    ],
+    "project_urls": [
+      "Bug Tracker, https://github.com/python/typing_extensions/issues",
+      "Changes, https://github.com/python/typing_extensions/blob/main/CHANGELOG.md",
+      "Documentation, https://typing-extensions.readthedocs.io/",
+      "Home, https://github.com/python/typing_extensions",
+      "Q & A, https://github.com/python/typing/discussions",
+      "Repository, https://github.com/python/typing_extensions"
+    ]
+  },
+  {
+    "name": "uiautomation",
+    "version": "2.0.29",
+    "license_expression": "",
+    "declared_license": "Apache 2.0",
+    "license_files": [
+      "uiautomation\\LICENSE"
+    ],
+    "project_urls": []
+  },
+  {
+    "name": "urllib3",
+    "version": "2.7.0",
+    "license_expression": "MIT",
+    "declared_license": "",
+    "license_files": [
+      "urllib3\\licenses\\LICENSE.txt"
+    ],
+    "project_urls": [
+      "Changelog, https://github.com/urllib3/urllib3/blob/main/CHANGES.rst",
+      "Documentation, https://urllib3.readthedocs.io",
+      "Code, https://github.com/urllib3/urllib3",
+      "Issue tracker, https://github.com/urllib3/urllib3/issues"
+    ]
+  }
+]

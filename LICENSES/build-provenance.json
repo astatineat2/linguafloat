@@ -1,0 +1,53 @@
+[
+  {
+    "path": "cv2/typing/__init__.py",
+    "sha256": "f8a066f22a98b56641a69200f0aaf9c3b5832b2f59f57862e56289cced8d9179",
+    "wheel_records": [
+      {
+        "distribution": "opencv-python",
+        "version": "5.0.0.93",
+        "record_matches": true
+      },
+      {
+        "distribution": "opencv-python-headless",
+        "version": "5.0.0.93",
+        "record_matches": false
+      }
+    ],
+    "reason": "Overlapping installed distributions; actual source supplied verbatim."
+  },
+  {
+    "path": "cv2/version.py",
+    "sha256": "fc17efee9203c23cac641981068621e80d3b0bbabe459f4133c9b2b4d91957fb",
+    "wheel_records": [
+      {
+        "distribution": "opencv-python",
+        "version": "5.0.0.93",
+        "record_matches": true
+      },
+      {
+        "distribution": "opencv-python-headless",
+        "version": "5.0.0.93",
+        "record_matches": false
+      }
+    ],
+    "reason": "Overlapping installed distributions; actual source supplied verbatim."
+  },
+  {
+    "path": "tencentcloud/__init__.py",
+    "sha256": "7f826a5638ff4ad31dfb3de3a64181ec3f282bf87b1c96ada92aa6a8f4523a37",
+    "wheel_records": [
+      {
+        "distribution": "tencentcloud-sdk-python-common",
+        "version": "3.1.186",
+        "record_matches": false
+      },
+      {
+        "distribution": "tencentcloud-sdk-python-tmt",
+        "version": "3.1.129",
+        "record_matches": true
+      }
+    ],
+    "reason": "Overlapping installed distributions; actual source supplied verbatim."
+  }
+]

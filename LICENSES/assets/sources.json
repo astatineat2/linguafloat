@@ -1,0 +1,72 @@
+[
+  {
+    "component": "codicon",
+    "url": "https://raw.githubusercontent.com/microsoft/vscode-codicons/0.0.36/LICENSE",
+    "sha256": "d6239afa918961b465b07bf7411cbe34ff6685854f58553db7966f4881a0211f"
+  },
+  {
+    "component": "elusive",
+    "url": "https://raw.githubusercontent.com/ReduxFramework/Elusive-Icons/master/README.md",
+    "sha256": "928ca73be34cff76f201165b576244a3a3ef7bfc0dbd59bd611b03cab1031439"
+  },
+  {
+    "component": "fontawesome5",
+    "url": "https://raw.githubusercontent.com/FortAwesome/Font-Awesome/5.15.4/LICENSE.txt",
+    "sha256": "e779748dfe75e84f974df3c7bc07f842011a100159158b0f1f49b2f2a5a515cb"
+  },
+  {
+    "component": "fontawesome6",
+    "url": "https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/LICENSE.txt",
+    "sha256": "9b914eae88817d63b576eab5aafde7068c7a1abae125d7cdfb034f1da43a9afc"
+  },
+  {
+    "component": "mdi5",
+    "url": "https://raw.githubusercontent.com/Templarian/MaterialDesign-Webfont/v5.9.55/LICENSE",
+    "sha256": "3bae6305bcaa6d10219b999f65c342034c2d40b1c0e8567fa08605e73ccba829"
+  },
+  {
+    "component": "mdi6",
+    "url": "https://raw.githubusercontent.com/Templarian/MaterialDesign-Webfont/v6.9.96/LICENSE",
+    "sha256": "3bae6305bcaa6d10219b999f65c342034c2d40b1c0e8567fa08605e73ccba829"
+  },
+  {
+    "component": "phosphor",
+    "url": "https://raw.githubusercontent.com/phosphor-icons/homepage/master/LICENSE",
+    "sha256": "6918b72504641180600cbbd4a86b0dfa9dfccf788775694325b71b9a029f6eb4"
+  },
+  {
+    "component": "remixicon",
+    "url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v2.5.0/License",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  {
+    "component": "antlr4",
+    "url": "https://raw.githubusercontent.com/antlr/antlr4/4.9.3/LICENSE.txt",
+    "sha256": "b1b379fcaf3219593a4c433feb1b35c780bed23fafaae440b1ae2771a9521e3a"
+  },
+  {
+    "component": "ffmpy",
+    "url": "https://raw.githubusercontent.com/Ch00k/ffmpy/1.0.0/LICENSE",
+    "sha256": "19ee5defbb6148c54c2d605adddbb49e37b1f37fbf18e5b45e4e1fae94be5331"
+  },
+  {
+    "component": "gradio",
+    "url": "https://raw.githubusercontent.com/gradio-app/gradio/gradio%405.35.0/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  {
+    "component": "tencentcloud",
+    "url": "https://raw.githubusercontent.com/TencentCloud/tencentcloud-sdk-python/master/LICENSE",
+    "sha256": "009c8843a98fcd3a6c167ea2d1c1ba38f55d849f3997f99f768391ec9e039d1c"
+  },
+  {
+    "component": "rapidocr-model-card",
+    "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/README.md",
+    "sha256": "3dc91bb3cb667df783178917d69b38bfabb8c935596f34243a1c9f0d36916b6e"
+  },
+  {
+    "component": "doclayout-model-card",
+    "url": "https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx/resolve/main/README.md",
+    "sha256": "ef30e30b57e315278703ddd7baf813df88f1594e2f4c0a8b2696a326a9ce8ad8"
+  }
+]

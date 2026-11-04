@@ -1,0 +1,9 @@
+{
+  "artwork_redistribution": true,
+  "license_inventory_reviewed": true,
+  "corresponding_source_complete": true,
+  "isolated_profile_verified": true,
+  "clean_windows_verified": false,
+  "evidence": "docs/verification-v0.11.0.md",
+  "artwork_confirmation": "User confirmed public redistribution, 2026-11-04"
+}
