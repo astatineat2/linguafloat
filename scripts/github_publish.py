@@ -50,12 +50,12 @@ def request(client, method, path, **kwargs):
 
 
 def ensure_repositories(client):
-    for name, private in (("linguafloat", True), ("linguafloat-releases", False)):
+    for name, private in (("linguafloat", False), ("linguafloat-releases", False)):
         path = f"/repos/{OWNER}/{name}"
         existing = client.get("https://api.github.com" + path)
         if existing.status_code == 404:
             info = request(client, "POST", "/user/repos", json={"name": name, "private": private,
-                            "description": "LinguaFloat development" if private else "LinguaFloat Windows downloads and corresponding source",
+                            "description": "LinguaFloat source code" if name == "linguafloat" else "LinguaFloat Windows downloads and corresponding source",
                             "auto_init": False})
         elif existing.status_code == 200:
             info = existing.json()

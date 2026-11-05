@@ -125,7 +125,7 @@ def prepare(bundle: Path, *, candidate=False):
     assets = [package, source, output / "update.json", output / "update.json.sig"]
     (output / "SHA256SUMS.txt").write_text("".join(sha256_file(p) + "  " + p.name + "\n" for p in assets), encoding="ascii")
     atomic_json(output / "LOCAL-RELEASE-REVIEW.json", {"public_release_ready": not missing,
-                "missing": missing, "version": __version__, "private_repository": "astatineat2/linguafloat",
+                "missing": missing, "version": __version__, "source_repository": "astatineat2/linguafloat",
                 "public_repository": REPOSITORY,
                 "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()})
     print(json.dumps({"output": str(output), "zip_MiB": round(package.stat().st_size / 1024**2, 1),
