@@ -3,9 +3,9 @@
 [下载公开稳定版](https://github.com/astatineat2/linguafloat-releases/releases/latest)  · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
 
 
-**面向大学生、科研学习者和外服游戏玩家的 Windows 桌面翻译工具。**
+**面向大学生、科研学习者的 Windows 桌面翻译工具。**
 
-LinguaFloat 是一个桌面翻译工具：翻译游戏屏幕上的外文对话、把你想说的中文转成英文发出去，在任意窗口选中文本即译，以及基于开源组件翻译 PDF、Word 和 PowerPoint 文档并保留原有排版。游戏交流、日常学习和文献阅读，不必再开三个工具来回倒。
+LinguaFloat 是一个桌面翻译工具：翻译游戏屏幕上的外文对话、把你想说的中文转成英文发出去，在任意窗口选中文本即译，以及基于开源组件翻译 PDF、Word 和 PowerPoint 文档并保留原有排版。游戏交流、日常学习和文献翻译，不必再开三个工具来回倒。
 
 ## 适合哪些场景
 
@@ -13,7 +13,7 @@ LinguaFloat 是一个桌面翻译工具：翻译游戏屏幕上的外文对话�
 | --- | --- |
 | 外服游戏与跨语言交流 | 框选屏幕对话进行 OCR 翻译；把输入的中文翻译成英文，复制后自行发送。 |
 | 课程学习与外文阅读 | 选中文字后用快捷键或右键入口翻译；无法直接取词时，可使用区域 OCR。 |
-| 科研资料与文献查阅 | 翻译 PDF、DOCX、PPTX；PDF 可选择保留版式和双语对照，结合原文阅读。 |
+| 科研资料与文献翻译 | 翻译 PDF、DOCX、PPTX；PDF 可选择保留版式和双语对照，结合原文阅读。 |
 
 ## 核心优势
 
