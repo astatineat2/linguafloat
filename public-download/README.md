@@ -2,9 +2,9 @@
 
 **面向大学生、科研学习者和外服游戏玩家的 Windows 桌面翻译工具。**
 
-[下载最新稳定版](https://github.com/astatineat2/linguafloat-releases/releases/latest) · [查看源码](https://github.com/astatineat2/linguafloat) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
+[下载 v0.17.0 build1](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.17.0-build1) · [查看源码](https://github.com/astatineat2/linguafloat) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
 
-**候选版本：v0.17.0 build1，尚未正式发布。** 已准备单页首次配置、精简中文安装向导及完整便携 ZIP。安装验收按用户要求暂停，本轮只准备 Release 草稿；公开稳定版仍为 v0.11.1，自动更新通道未切换。新增功能、候选包大小及已知限制见[候选版说明](候选版本-v0.17.0.md)。草稿附件只有具备仓库权限的维护者可查看。
+**当前公开版本：v0.17.0 build1。** 新增单页首次配置，精简中文安装向导，提供完整便携 ZIP、中文安装包与完整对应源码。安装验收仍暂停；请通过本版直接下载页获取，旧版自动更新通道暂保留 v0.11.1，`/releases/latest` 仍指向旧版。新增功能、文件大小及已知限制见[本版说明](候选版本-v0.17.0.md)。
 
 ## 为什么做 LinguaFloat
 
@@ -24,29 +24,30 @@ LinguaFloat 最初是为了玩外服游戏时，看懂屏幕上的外文对话�
 
 - **兼顾看懂与表达。** 区域翻译帮助理解外文，输入翻译帮助组织回复；目标语言可按需要选择。
 - **多种翻译方式集中使用。** 选中、输入、屏幕区域和文件翻译共用供应商配置，日常交流与学习可以接着用。
-- **按阅读需要处理文献。** PDF 支持纯译文、双语左右并排或原译交替；可选择保留版式，或保留参考文献及后续原文。
-- **供应商与模型可配置。** 支持 Responses API 和 Chat Completions，可填写模型名称或获取模型列表；实际可用性取决于供应商支持、账户权限及额度。
+- **按阅读需要处理文献。** PDF 支持纯译文、双语左右并排或原译交替；支持保留版式，默认保护参考文献，后续可识别的附录继续翻译。
+- **供应商与模型可配置。** 支持 Responses、Chat Completions、Anthropic Messages 与 Gemini generateContent；可手动填写模型或主动获取模型列表，实际可用性取决于供应商、账户及额度。
 - **减少重复操作与请求。** 保存常用设置和输出目录，复用匹配的译文缓存；文件任务提供进度、历史及供应商返回的 Token 用量。
 - **适合持续使用。** 区域翻译支持暂停、移动和缩放；游戏模式仅保留区域翻译，软件内可查看指南、检查并安装更新。
 
 ## 下载与开始使用
 
-当前稳定版：**v0.11.1 · Windows 11 x64**。
+当前公开版本：**v0.17.0 build1 · Windows x64**。完整安装、完成页、升级及卸载尚未验收，发布不代表这些项目已通过。
 
-1. 前往 [最新稳定版下载页](https://github.com/astatineat2/linguafloat-releases/releases/latest)，下载完整的 `LinguaFloat-v版本号-win-x64.zip`。
+1. 前往 [v0.17.0 build1 下载页](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.17.0-build1)，选择完整便携 ZIP 或中文安装程序。
 2. 完整解压到有写入权限的目录，运行 `LinguaFloat.exe`。**无需安装 Python**；请保留 `_internal`、`document-runtime` 和更新助手，不要只复制 EXE。
-3. 在“配置设置”填写自己的供应商、接口、模型和密钥，测试并保存，再选择“使用此配置”。详细步骤见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
+3. 首次进入可配置翻译服务并保存，或跳过后从配置入口设置。保存不会自动请求接口；“获取模型”或实际翻译由用户主动触发。详细步骤见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
 
-当前软件 ZIP 约 **492 MiB**，解压后约 **1.21 GiB**；更新需另留下载、新版暂存及旧版备份空间，建议额外预留至少 2 GiB。首次 PDF 处理还可能下载缺失的布局模型与字体。
+完整便携 ZIP 约 **501.4 MiB**，中文安装包约 **371.2 MiB**，完整运行文件约 **1.23 GiB**，无需同时下载两种包。安装临时空间峰值未实测；首次 PDF 处理还可能下载缺失的布局模型与字体，未验证完全离线首次使用。
 
 第三方翻译 API 的费用由服务商收取，与下载软件是两回事。首次启动不会自动翻译或上传论文；“测试连接”和主动翻译会发送文字给所选供应商，可能产生费用。屏幕 OCR 在本地运行，后续翻译仍由所选服务处理。
 
 取词和游戏画面兼容性因软件而异；独占全屏或受保护画面可能无法截图。复杂扫描件、图表和公式的译文排版需要检查，不保证所有文件无损还原。当前程序没有 Windows Authenticode 签名；下载及更新校验、网络说明见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
 
-## 最新版本 · v0.11.1
+## 当前公开版本 · v0.17.0 build1
 
-- 修复 GitHub API 限流时无法检查更新：改用同一公开仓库的签名更新元数据，并保留版本及完整性校验。
-- API 退避期间避免重复请求，不在软件中内置 GitHub 访问凭据。
+- 新增单页首次服务配置，支持保存和跳过；精简中文安装向导。
+- 保留文档局部失败保留、参考文献保护及已有工作台与供应商修复；完整安装验收继续暂停。
+- 本版供手动下载。现有更新器不接受 `v0.17.0-build1` 标签，因此保留旧版签名更新通道，避免破坏检查更新。
 
 [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md) · [发布验证与实测范围](https://github.com/astatineat2/linguafloat-releases/blob/main/验证记录.md)
 
@@ -59,6 +60,6 @@ LinguaFloat 集成了多个开源项目的能力，感谢这些项目及其贡�
 - [RapidOCR](https://github.com/RapidAI/RapidOCR) 与 [ONNX Runtime](https://github.com/microsoft/onnxruntime)：本地文字识别与模型运行。
 - [Qt for Python / PySide6](https://doc.qt.io/qtforpython-6/)：桌面界面；其他组件详见 [第三方声明](https://github.com/astatineat2/linguafloat-releases/blob/main/THIRD_PARTY_NOTICES.md)。
 
-LinguaFloat 的适用源码按 [AGPL-3.0-only](https://github.com/astatineat2/linguafloat-releases/blob/main/LICENSE) 提供，第三方组件各自保留原有许可证。[开发源码仓库](https://github.com/astatineat2/linguafloat)目前保持私有；已公开版本在 [Releases](https://github.com/astatineat2/linguafloat-releases/releases) 中提供与软件匹配的 `corresponding-source.zip` 及必要材料。候选版正式发布前仍需核对其对应源码材料。
+LinguaFloat 的适用源码按 [AGPL-3.0-only](https://github.com/astatineat2/linguafloat-releases/blob/main/LICENSE) 提供，第三方组件各自保留原有许可证。[开发源码仓库](https://github.com/astatineat2/linguafloat)已按作者确认公开；已公开版本在 [Releases](https://github.com/astatineat2/linguafloat-releases/releases) 中提供与软件匹配的 `corresponding-source.zip` 及必要材料。
 
-普通用户只需下载完整 `win-x64.zip`；需要源码时，请选择明确标注的对应源码附件，GitHub 自动生成的 “Source code.zip” 不等同于该附件。
+普通用户选择完整便携 ZIP 或中文安装程序即可；需要源码时，请选择明确标注的对应源码附件，GitHub 自动生成的 “Source code.zip” 不等同于该附件。
