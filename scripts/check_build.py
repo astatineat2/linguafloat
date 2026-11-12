@@ -22,10 +22,11 @@ args = parser.parse_args()
 archive = ZlibArchiveReader(str(args.build_dir / "PYZ-00.pyz"))
 checked = 0
 for path in (root / "src/linguafloat").glob("*.py"):
-    if path.stem == "__main__":
+    # Retired import-preview UI is retained as legacy source, not shipped.
+    if path.stem in {"__main__", "cc_switch_ui"}:
         continue
     module = "linguafloat" if path.stem == "__init__" else f"linguafloat.{path.stem}"
-    if path.stem in {"document_worker", "document_office", "document_pdf", "document_layout", "document_geometry", "document_scan_layout", "document_scan_recovery", "document_scientific", "document_artifacts", "document_frontmatter", "document_graphics", "document_graphic_layout", "document_references"}:
+    if path.stem in {"document_failures", "document_worker", "document_office", "document_pdf", "document_layout", "document_geometry", "document_scan_layout", "document_scan_recovery", "document_scientific", "document_artifacts", "document_frontmatter", "document_graphics", "document_graphic_layout", "document_references", "document_ocr"}:
         runtime_source = args.dist_dir / "document-runtime" / "src" / "linguafloat" / path.name
         assert runtime_source.read_bytes() == path.read_bytes(), f"Stale document worker: {path.name}"
         checked += 1
@@ -39,7 +40,7 @@ for name in ("app.ico", "1.png", "backg.png", "chevron-down.png", "chevron-up.pn
 assert (args.dist_dir / "LinguaFloat.exe").is_file()
 assert (args.dist_dir / "LinguaFloatUpdater.exe").is_file()
 assert (args.dist_dir / "_internal/release/channel.json").read_bytes() == (root / "release/channel.json").read_bytes()
-for name in ("__init__.py", "api_compat.py", "document_core.py", "document_metrics.py", "document_scheduler.py", "document_artifacts.py", "document_office.py", "document_pdf.py", "document_layout.py", "document_geometry.py", "document_scan_layout.py", "document_scan_recovery.py", "document_scientific.py", "document_references.py", "document_worker.py"):
+for name in ("__init__.py", "api_compat.py", "document_context.py", "document_core.py", "document_metrics.py", "document_scheduler.py", "document_artifacts.py", "document_office.py", "document_pdf.py", "document_layout.py", "document_geometry.py", "document_scan_layout.py", "document_scan_recovery.py", "document_scientific.py", "document_references.py", "document_worker.py"):
     assert (args.dist_dir / "document-runtime/src/linguafloat" / name).read_bytes() == (root / "src/linguafloat" / name).read_bytes()
 assert (args.dist_dir / "document-runtime/worker_entry.py").read_bytes() == (root / "scripts/document_worker_entry.py").read_bytes()
 print(f"Portable build verified: {checked} Python modules and 6 image assets match source.")

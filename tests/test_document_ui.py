@@ -36,32 +36,37 @@ def test_document_config_follows_active_provider_without_separate_model(controll
     assert not hasattr(page,"model") and not hasattr(page,"provider")
 
 
-def test_reference_skip_persists_and_is_snapshotted(controller, tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_skip", [False, True])
+@pytest.mark.parametrize("trial,pages", [(False, ""), (True, ""), (False, "1-3")])
+def test_reference_protection_is_always_snapshotted(controller, tmp_path, monkeypatch, legacy_skip, trial, pages):
     c, _, store = controller
     page = c.window.documents
-    assert not page.skip_references.isChecked()
-    page.skip_references.setChecked(True)
-    assert store.load().document_skip_references
+    c.settings.document_skip_references = legacy_skip
+    store.save(c.settings)
+    assert not hasattr(page, "skip_references")
     restored = MainWindow(store.load(), "missing")
     from linguafloat.document_ui import DocumentController
     DocumentController(restored.documents, store.load(), c.documents.credentials,
                        tmp_path / "restored.sqlite", parent=restored)
-    assert restored.documents.skip_references.isChecked()
+    assert not hasattr(restored.documents, "skip_references")
     restored.allow_close()
     restored.close()
     source = tmp_path / "references.pdf"
     source.touch()
     page.add_files([str(source)])
+    page.pages.setText(pages)
+    monkeypatch.setattr("linguafloat.document_ui.worker_command", lambda: (source, source))
     monkeypatch.setattr(c.documents, "next_job", lambda: None)
-    c.documents.start()
+    c.documents.start(trial=trial)
     assert len(c.documents.queue) == 1
     job, _, _ = c.documents.queue[0]
-    assert job.skip_references and not page.skip_references.isEnabled()
-    page.skip_references.setChecked(False)
-    assert job.skip_references  # A later edit cannot alter an existing task.
+    assert job.skip_references is True
+    assert job.trial is trial and job.pages == pages
+    c.settings.document_skip_references = False
+    assert job.skip_references is True
     c.documents.queue.clear()
     page.set_busy(False)
-    assert page.skip_references.isEnabled()
+    assert "document_skip_references" not in page.preferences()
 
 
 def test_document_queue_validation_does_not_start_worker(controller, tmp_path):
@@ -183,13 +188,16 @@ def test_document_rate_controls_visible_without_advanced(controller, application
     window.resize(*size)
     window.pages.setCurrentIndex(1)
     window.show()
+    window.open_provider_editor(window._editing_id)
+    window.provider_editor.resize(*size)
     window.advanced_toggle.setChecked(False)
     application.processEvents()
     for control in (window.document_concurrency_spin, window.document_rpm_spin, window.document_tpm_spin):
         window.config_scroll.ensureWidgetVisible(control)
         application.processEvents()
         assert control.isVisible()
-        assert window.rect().contains(QRect(control.mapTo(window, QPoint()), control.size()))
+        editor = window.provider_editor
+        assert editor.rect().contains(QRect(control.mapTo(editor, QPoint()), control.size()))
     assert window.config_scroll.horizontalScrollBar().maximum() == 0
 
 
@@ -240,7 +248,7 @@ def test_fixed_font_and_persistent_history(controller, tmp_path, application):
     from test_document_core import job_for
     c, _, config = controller
     assert not hasattr(c.window, "font_size_combo")
-    assert application.font().pointSize() == 14
+    assert application.font().pixelSize() == 14
     source = tmp_path / "previous.pdf"
     source.write_bytes(b"12345")
     store = JobStore(c.documents.database)
@@ -275,8 +283,7 @@ def test_history_distinguishes_preserved_original_regions(controller):
     page = c.window.documents
     page.set_history([("partial-layout", "C:/Example/paper.pdf", "completed", 1780000000,
                        json.dumps(dict(untranslated_regions=3)))])
-    assert "3 处保留原文" in page.history.topLevelItem(0).text(6)
-    assert page.history.topLevelItem(0).text(6).startswith("部分完成，需处理")
+    assert page.history.topLevelItem(0).text(6) == "已完成，3 处未翻译"
     c.documents.batch_ids = ["partial-layout"]
     c.documents.batch_results = {"partial-layout": "部分完成"}
     c.documents.update_batch()
@@ -326,5 +333,6 @@ def test_document_tab_does_not_show_unrelated_completion_and_activity_updates_ro
         assert page.rows[identity]["state"] == "翻译中"
         assert page.rows[identity]["bar"].maximum() == 0
         assert "R0001" in page.status.text()
+        assert page.status.text().splitlines()[0] == "翻译中"
     finally:
         c.documents.process = None

@@ -25,15 +25,30 @@ def test_drag_fit_restore_and_updates_keep_columns(controller,tmp_path):
         QTest.mousePress(header.viewport(),Qt.MouseButton.LeftButton,pos=point)
         QTest.mouseMove(header.viewport(),point+QPoint(75,0),delay=20)
         QTest.mouseRelease(header.viewport(),Qt.MouseButton.LeftButton,pos=point+QPoint(75,0))
+        # Header sizes change immediately; the view updates its scroll range later.
+        for _ in range(20):
+            QTest.qWait(25)
+            total=sum(tree.columnWidth(i) for i in range(tree.columnCount()))
+            overflow=total-tree.viewport().width()
+            if overflow>0 and tree.horizontalScrollBar().maximum()==overflow:
+                break
         assert tree.columnWidth(0)>old+40
-        assert tree.horizontalScrollBar().maximum()>0
+        assert total>tree.viewport().width()
+        assert tree.horizontalScrollBar().maximum()==overflow>0
+        assert not page._auto_columns[name]
     page.file_tabs.setCurrentIndex(0)
     header=page.files.header();width=page.files.columnWidth(0)
-    point=QPoint(width-1,header.height()//2)
+    item=page.files.topLevelItem(0)
+    assert item.sizeHint(0).width()==0 and item.sizeHint(0).height()==56
+    text_width=page.files.fontMetrics().horizontalAdvance(item.text(0))+32
+    point=QPoint(header.sectionViewportPosition(0)+width-1,header.height()//2)
     QTest.mouseDClick(header.viewport(),Qt.MouseButton.LeftButton,pos=point)
     QTest.qWait(30)
     assert page.files.columnWidth(0)>width  # Full long name on double click.
+    assert page.files.columnWidth(0)>=min(header.maximumSectionSize(),text_width)
     assert page.files.header().sectionResizeMode(0)==QHeaderView.ResizeMode.Interactive
+    assert not page._auto_columns['files']
+    assert item.sizeHint(0).width()==0 and item.sizeHint(0).height()==56
     page.files.setColumnWidth(0,430);page.history.setColumnWidth(0,390)
     widths=page.preferences()['document_column_widths']
     page.update_row(rowid,'翻译中',45)
@@ -47,11 +62,12 @@ def test_drag_fit_restore_and_updates_keep_columns(controller,tmp_path):
     assert restored.preferences()['document_column_widths']==widths
     item=page.history.topLevelItem(0)
     assert item.text(2)=='4.2 MB' and item.text(3)=='10分55秒'
-    assert '10 处保留原文' in item.toolTip(6)
+    assert item.text(6) == '已完成，10 处未翻译'
+    assert '已完成，10 处未翻译' in item.toolTip(6)
     page.file_tabs.setCurrentIndex(1);page.reset_columns.click();QTest.qWait(220)
     assert page.files.columnWidth(0)==430
     assert page.history.columnWidth(0)==page._default_columns(page.history,'history')[0]
-    assert store.load().document_column_widths['history'][0]==page.history.columnWidth(0)
+    assert 'history' not in store.load().document_column_widths
     restored.close()
 
 

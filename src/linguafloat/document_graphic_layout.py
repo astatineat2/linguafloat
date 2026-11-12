@@ -48,6 +48,33 @@ def plot_bounds(page, area):
     return candidates[0]
 
 
+def stationary_axis_label(page, area, box):
+    """Allow an unchanged title box beside a measured neutral vertical axis.
+
+    Perspective charts have no rectangular plot bounds. This evidence permits
+    in-place replacement only; glyph_patch and clear_of_original still decide
+    whether source ink can be removed and the complete replacement can fit.
+    """
+    import cv2
+    import numpy as np
+    import pymupdf as f
+    clip = (f.Rect(area['box']) | box) & page.rect
+    pix = page.get_pixmap(matrix=f.Matrix(4, 4), clip=clip, colorspace=f.csRGB, alpha=False)
+    rgb = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3).astype(int)
+    neutral = ((rgb.max(axis=2) - rgb.min(axis=2) <= 24) & (rgb.max(axis=2) < 180)).astype(np.uint8)
+    length = max(120, int(pix.height * .4), int(box.height * 4))
+    mask = cv2.morphologyEx(neutral, cv2.MORPH_OPEN, np.ones((length, 1), np.uint8))
+    _, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    for x, y, w, h, _ in stats[1:]:
+        if w > 8:
+            continue
+        rule = f.Rect((pix.x+x)/4, (pix.y+y)/4, (pix.x+x+w)/4, (pix.y+y+h)/4)
+        if (box.x1 + 2 <= rule.x0 <= box.x1 + max(36, box.width * 4)
+                and rule.y0 <= box.y0 + 1 and rule.y1 >= box.y1 - 1):
+            return True
+    return False
+
+
 def ruled_cells(page, area):
     """Use enclosing table rules, not tiny formula/subscript OCR row centres."""
     import cv2
@@ -179,6 +206,9 @@ def plan_area(page, area):
         is_x=bool(plot and b.y0>plot.y1 and b.width>b.height*2)
         if is_y or is_x:
             if plot is None:
+                if is_y and stationary_axis_label(page, area, b):
+                    r.update(geometry='axis-in-place', group=area['id']+'-stationary-axes')
+                    continue
                 r['reason']='无法可靠识别绘图区边界，未移动坐标轴标题；请提供清晰原 PDF 以检查图线结构。'
                 continue
             # Collect adjacent protected suffixes geometrically. Preserve their

@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QCursor, QFont, QGuiApplication, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
+    QLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -34,30 +37,39 @@ from PySide6.QtWidgets import (
 import qtawesome as qta
 
 from linguafloat import __version__
-from linguafloat.codex_config import default_codex_config_path
 from linguafloat.config import AppSettings, ProviderProfile, TARGET_LANGUAGES
 from linguafloat.game_mode import GAME_MODES
 from linguafloat.assets import Background, app_icon
 from linguafloat.provider_tools import address_suggestion
 from linguafloat.model_picker import ModelSelector
+from linguafloat.config_dashboard import ConfigDashboard, ProviderEditor
 from linguafloat.document_ui import DocumentPage
 from linguafloat.ui_layout import FieldGrid
+from linguafloat.hotkey_edit import HotkeyEdit
 from linguafloat.resize import create_resize_edges, layout_resize_edges
 from linguafloat.theme import APP_STYLESHEET, FLOAT_STYLESHEET, section_heading, separator, set_state
+from linguafloat.workbench import Workbench, MessageBox as QMessageBox
 
 
-def apply_ui_font(application: QApplication, point_size: int) -> None:
+def apply_ui_font(application: QApplication, pixel_size: int) -> None:
     font = QFont()
     font.setFamilies(
         ["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Arial"]
     )
-    font.setPointSize(point_size)
+    # Logical pixels are scaled by Qt for the actual Windows display.
+    font.setPixelSize(pixel_size)
     font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-    application.setStyle("Fusion")
-    application.setFont(font)
+    if application.style().objectName().casefold() != "fusion":
+        application.setStyle("Fusion")
+    global_changed = application.font() != font
+    if global_changed:
+        application.setFont(font)
     # Windows supplies a separate 9pt class font for item views and combo popups.
-    application.setFont(font, "QAbstractItemView")
+    # A global update can make the class lookup match before existing views
+    # receive their class-specific font notification.
+    if global_changed or application.font("QAbstractItemView") != font:
+        application.setFont(font, "QAbstractItemView")
 
 
 class WindowDragHandle(QLabel):
@@ -89,6 +101,64 @@ class WindowDragHandle(QLabel):
             self._drag_origin = None
 
 
+class ShortcutRow(QWidget):
+    """Three equal tracks at normal widths, with a full-width heading when tight."""
+
+    def __init__(self, title, icon, parent=None):
+        super().__init__(parent)
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(12)
+        self.grid.setVerticalSpacing(8)
+        self.heading = section_heading(title, icon)
+        self.parts = [self.heading]
+        self.columns = 0
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.reflow()
+
+    def add_control(self, control):
+        if isinstance(control, QLayout):
+            field = QWidget()
+            control.setContentsMargins(0, 0, 0, 0)
+            field.setLayout(control)
+        else:
+            field = control
+        field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.parts.append(field)
+        self.columns = 0
+        self.reflow()
+
+    def reflow(self):
+        widths = [max(part.minimumSizeHint().width(), part.minimumWidth()) for part in self.parts]
+        track = max([self.fontMetrics().horizontalAdvance("Ctrl+Alt+Shift+T") + 32, *widths])
+        columns = 3 if self.width() >= track * 3 + 24 else 2 if self.width() >= track * 2 + 12 else 1
+        if columns == self.columns:
+            return
+        for part in self.parts:
+            self.grid.removeWidget(part)
+        for col in range(3):
+            self.grid.setColumnStretch(col, 1 if col < columns else 0)
+            self.grid.setColumnMinimumWidth(col, 0)
+        for index, part in enumerate(self.parts):
+            if columns == 3:
+                self.grid.addWidget(part, 0, index, Qt.AlignmentFlag.AlignVCenter)
+            elif index == 0:
+                self.grid.addWidget(part, 0, 0, 1, columns)
+            else:
+                self.grid.addWidget(part, 1 + (index - 1) // columns, (index - 1) % columns)
+        self.columns = columns
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reflow()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange and hasattr(self, "parts"):
+            self.columns = 0
+            self.reflow()
+
+
 class MainWindow(QMainWindow):
     save_requested = Signal(str, str, str, str, str, str, str, str, str, int)
     delete_key_requested = Signal(str)
@@ -97,6 +167,10 @@ class MainWindow(QMainWindow):
     add_provider_requested = Signal()
     delete_provider_requested = Signal(str)
     import_codex_requested = Signal(str)
+    import_sql_requested = Signal()
+    export_cc_sql_requested = Signal()
+    configure_opencode_requested = Signal()
+    configure_provider_requested = Signal(str)
     export_codex_requested = Signal(str, str, bool)
     connection_test_requested = Signal(str, str, str, str, str, str, str)
     screen_select_requested = Signal()
@@ -136,7 +210,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self.setStyleSheet(APP_STYLESHEET)
 
-        shell = Background()
+        shell = QWidget()
         shell_layout = QVBoxLayout(shell)
         shell_layout.setContentsMargins(20, 12, 20, 8)
         shell_layout.setSpacing(10)
@@ -155,7 +229,7 @@ class MainWindow(QMainWindow):
         title_row.addWidget(title)
         self.version_label = QLabel(f"v{__version__}")
         self.version_label.setAccessibleName("软件版本")
-        self.version_label.setStyleSheet("color: #68717d; font-size: 10pt;")
+        self.version_label.setStyleSheet("color: #626980; font-size: 12px;")
         title_row.addWidget(self.version_label)
         title_row.addStretch(1)
         self.game_badge = QLabel("游戏模式关闭")
@@ -165,7 +239,7 @@ class MainWindow(QMainWindow):
         title_row.addWidget(self.game_badge)
         title_row.addWidget(self.screen_badge)
         self.help_button = QPushButton("帮助与更新")
-        self.help_button.setToolTip("首次使用指南、许可证和软件更新")
+        self.help_button.setToolTip("首次使用指南和软件更新")
         self.help_button.clicked.connect(self.help_requested)
         title_row.addWidget(self.help_button)
         header_layout.addLayout(title_row)
@@ -192,7 +266,7 @@ class MainWindow(QMainWindow):
         self.active_connection_status = QLabel("当前配置：尚未测试")
         self.active_connection_status.setWordWrap(True)
         self.active_connection_status.setTextFormat(Qt.TextFormat.PlainText)
-        self.active_connection_status.setStyleSheet("color: #68717d; font-size: 10pt;")
+        self.active_connection_status.setStyleSheet("color: #626980; font-size: 13px;")
         # These controls belong to daily translation, not the shared header.
         while active_row.count():
             child = active_row.takeAt(0)
@@ -208,6 +282,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(20, 12, 20, 16)
         layout.setSpacing(10)
+        function_title = QLabel("功能设置")
+        function_title.setObjectName("pageTitle")
+        layout.addWidget(function_title)
         self.function_layout = layout
         self.function_scroll = self._scroll(root)
         function_page = QWidget()
@@ -216,7 +293,7 @@ class MainWindow(QMainWindow):
         function_page_layout.setContentsMargins(0, 0, 0, 0)
         function_page_layout.setSpacing(0)
         function_page_layout.addWidget(self.function_scroll, 1)
-        self.pages.addTab(function_page, qta.icon("mdi6.tune-variant", color="#66717d"), "功能设置")
+        self.pages.addTab(function_page, qta.icon("mdi6.tune-variant", color="#626980"), "功能设置")
         layout.addWidget(section_heading("日常翻译", "mdi6.translate"))
         daily_fields = FieldGrid()
         daily_fields.add_field("当前配置", self.active_provider_combo)
@@ -333,14 +410,10 @@ class MainWindow(QMainWindow):
         self.screen_status.setStyleSheet("font-size: 13px;")
         layout.addWidget(self.screen_status)
 
-        input_row = QHBoxLayout()
         layout.addWidget(separator())
-        layout.addWidget(section_heading("选中与右键翻译", "mdi6.cursor-text"))
-        self.function_fields = FieldGrid()
+        self.function_fields = ShortcutRow("选中与右键翻译", "mdi6.cursor-text")
         layout.addWidget(self.function_fields)
         layout.addWidget(separator())
-        input_row.addWidget(section_heading("输入翻译", "mdi6.translate"))
-        input_row.addStretch()
         self.input_language_combo = QComboBox()
         for code, (label, _) in TARGET_LANGUAGES.items():
             self.input_language_combo.addItem(label, code)
@@ -349,22 +422,15 @@ class MainWindow(QMainWindow):
         self.input_language_combo.currentIndexChanged.connect(
             lambda: self.input_language_requested.emit(self.input_language_combo.currentData())
         )
-        layout.addLayout(input_row)
         input_key_row = QHBoxLayout()
-        self.input_hotkey_edit = QLineEdit(settings.input_hotkey)
+        input_key_row.setSpacing(6)
+        self.input_hotkey_edit = HotkeyEdit(settings.input_hotkey)
         self.input_hotkey_edit.setAccessibleName("输入翻译快捷键")
         input_key_row.addWidget(self.input_hotkey_edit, 1)
-        self.input_hotkey_save = QToolButton()
-        self.input_hotkey_save.setIcon(qta.icon("mdi6.content-save-outline", color="#303841"))
-        self.input_hotkey_save.setToolTip("保存输入翻译快捷键")
-        self.input_hotkey_save.setAccessibleName("保存输入翻译快捷键")
-        self.input_hotkey_save.setFixedSize(38, 38)
-        self.input_hotkey_save.clicked.connect(lambda: self.input_hotkey_requested.emit(self.input_hotkey_edit.text()))
-        input_key_row.addWidget(self.input_hotkey_save)
-        input_fields = FieldGrid()
-        input_fields.add_field("输入翻译快捷键", input_key_row)
-        input_fields.add_field("目标语言", self.input_language_combo)
-        layout.addWidget(input_fields)
+        self.input_fields = ShortcutRow("输入翻译", "mdi6.translate")
+        self.input_fields.add_control(input_key_row)
+        self.input_fields.add_control(self.input_language_combo)
+        layout.addWidget(self.input_fields)
 
         # Keep the region controls near the top; secondary game settings follow.
         layout.removeItem(game_row)
@@ -426,9 +492,22 @@ class MainWindow(QMainWindow):
         function_page_layout.addWidget(function_footer)
         layout.addStretch()
 
-        config_split = QSplitter()
-        self.pages.addTab(config_split, qta.icon("mdi6.server-outline", color="#66717d"), "配置设置")
-        sidebar = QWidget()
+        self.dashboard = ConfigDashboard()
+        self.pages.addTab(self.dashboard, qta.icon("mdi6.server-outline", color="#626980"), "配置设置")
+        self.dashboard.edit_requested.connect(self.open_provider_editor)
+        self.dashboard.use_requested.connect(self.active_provider_requested.emit)
+        self.dashboard.add_requested.connect(self.add_provider_requested.emit)
+        self.dashboard.official_requested.connect(self.configure_opencode_requested.emit)
+        self.dashboard.preset_requested.connect(self.configure_provider_requested.emit)
+        self.dashboard.duplicate_requested.connect(self.duplicate_provider_requested.emit)
+        self.dashboard.delete_requested.connect(self._delete_from_card)
+        self.dashboard.sql_requested.connect(self.import_sql_requested.emit)
+        self.dashboard.export_requested.connect(self.export_cc_sql_requested.emit)
+        self.provider_editor = ProviderEditor(self)
+        editor_layout = QVBoxLayout(self.provider_editor)
+        editor_layout.setContentsMargins(0,0,0,0)
+        sidebar = QWidget(self)
+        sidebar.hide()
         sidebar.setObjectName("sidebar")
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(12, 14, 12, 12)
@@ -445,7 +524,6 @@ class MainWindow(QMainWindow):
         duplicate.setIcon(qta.icon("mdi6.content-copy", color="#303841"))
         duplicate.clicked.connect(lambda: self.duplicate_provider_requested.emit(self._editing_id))
         side.addWidget(duplicate)
-        config_split.addWidget(sidebar)
         detail = QWidget()
         layout = QVBoxLayout(detail)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -456,13 +534,7 @@ class MainWindow(QMainWindow):
         config_right_layout = QVBoxLayout(config_right)
         config_right_layout.setContentsMargins(0, 0, 0, 0)
         config_right_layout.addWidget(self.config_scroll, 1)
-        config_split.addWidget(config_right)
-        config_split.setSizes([220, 760])
-        config_split.setHandleWidth(1)
-        config_split.setStretchFactor(0, 0)
-        config_split.setStretchFactor(1, 1)
-        config_split.setCollapsible(0, False)
-        config_split.setCollapsible(1, False)
+        editor_layout.addWidget(config_right)
         sidebar.setMinimumWidth(170)
         self.editing_label = QLabel("编辑配置")
         self.editing_label.setStyleSheet("font-weight: 600;")
@@ -495,13 +567,12 @@ class MainWindow(QMainWindow):
 
         self.provider_name_edit = QLineEdit()
         self.provider_name_edit.setClearButtonEnabled(True)
-        form.add_field("显示名称", self.provider_name_edit)
+        form.add_field("服务名称", self.provider_name_edit, wide=True)
         self.favorite_check = QCheckBox("收藏此配置")
-        form.add_field("", self.favorite_check)
 
         self.base_url_edit = QLineEdit()
         self.base_url_edit.setClearButtonEnabled(True)
-        form.add_field("Base URL", self.base_url_edit, wide=True)
+        form.add_field("接口地址", self.base_url_edit, wide=True)
         self.address_hint = QLabel()
         self.address_hint.setWordWrap(True)
         self.address_hint.setTextFormat(Qt.TextFormat.PlainText)
@@ -514,7 +585,8 @@ class MainWindow(QMainWindow):
         self.api_mode_combo = QComboBox()
         self.api_mode_combo.addItem("Responses API", "responses")
         self.api_mode_combo.addItem("Chat Completions", "chat_completions")
-        form.add_field("接口类型", self.api_mode_combo)
+        self.api_mode_combo.addItem("Anthropic Messages", "anthropic")
+        self.api_mode_combo.addItem("Gemini generateContent", "gemini")
 
         self.model_edit = QLineEdit()
         self.model_edit.setClearButtonEnabled(True)
@@ -528,8 +600,8 @@ class MainWindow(QMainWindow):
         self.model_search_combo.setAccessibleName("搜索或选择模型")
         self.model_search_combo.activated.connect(self._remember_edited_model)
         self.model_search_combo.lineEdit().returnPressed.connect(lambda: self.model_edit.setText(self.model_search_combo.currentText()))
-        form.add_field("模型", self.model_search_combo)
         model_row = QHBoxLayout()
+        model_row.addWidget(self.model_search_combo, 1)
         self.fetch_models_button = QPushButton("获取模型")
         self.fetch_models_button.clicked.connect(lambda: self.provider_tools_requested.emit("models"))
         model_row.addWidget(self.fetch_models_button)
@@ -539,19 +611,18 @@ class MainWindow(QMainWindow):
         self.favorite_model_button.setAccessibleName("收藏当前模型")
         self.favorite_model_button.clicked.connect(self._toggle_model_favorite)
         model_row.addWidget(self.favorite_model_button)
-        model_row.addStretch()
 
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.key_visibility_action = self.api_key_edit.addAction(
-            qta.icon("mdi6.eye-outline", color="#68717d"),
+            qta.icon("mdi6.eye-outline", color="#626980"),
             QLineEdit.ActionPosition.TrailingPosition,
         )
         self.key_visibility_action.setCheckable(True)
         self.key_visibility_action.toggled.connect(self._set_key_visible)
         self._set_key_visible(False)
         form.add_field("API key", self.api_key_edit, wide=True)
-        form.add_field("", model_row, wide=True)
+        form.add_field("模型", model_row, wide=True)
         self.connection_status = QLabel()
         self.connection_status.setWordWrap(True)
         self.connection_status.setTextFormat(Qt.TextFormat.PlainText)
@@ -562,9 +633,9 @@ class MainWindow(QMainWindow):
         self.env_key_edit.setClearButtonEnabled(True)
         self.env_key_edit.setPlaceholderText("例如 OPENAI_API_KEY，可留空")
 
-        self.hotkey_edit = QLineEdit(settings.hotkey)
-        self.hotkey_edit.setClearButtonEnabled(True)
-        self.function_fields.add_field("选中翻译快捷键", self.hotkey_edit)
+        self.hotkey_edit = HotkeyEdit(settings.hotkey)
+        self.hotkey_edit.setAccessibleName("选中翻译快捷键")
+        self.function_fields.add_control(self.hotkey_edit)
 
         self.trigger_mode_combo = QComboBox()
         self.trigger_mode_combo.addItem("快捷键 + 右键", "both")
@@ -575,7 +646,8 @@ class MainWindow(QMainWindow):
         self.trigger_mode_combo.currentIndexChanged.connect(
             self._update_trigger_fields
         )
-        self.function_fields.add_field("触发方式", self.trigger_mode_combo)
+        self.trigger_mode_combo.setAccessibleName("选中与右键翻译触发方式")
+        self.function_fields.add_control(self.trigger_mode_combo)
 
         layout.addWidget(form)
         self.timeout_spin = QSpinBox()
@@ -586,6 +658,8 @@ class MainWindow(QMainWindow):
         advanced = QWidget()
         advanced_form = FieldGrid()
         QVBoxLayout(advanced).addWidget(advanced_form)
+        advanced_form.add_field("接口类型", self.api_mode_combo)
+        advanced_form.add_field("", self.favorite_check)
         advanced_form.add_field("环境变量名", self.env_key_edit, wide=True)
         advanced_form.add_field("请求超时", self.timeout_spin)
         self.retries_spin.setToolTip("普通选中翻译与文档翻译共用此重试上限；输入/区域翻译保持现有重试策略。")
@@ -617,6 +691,10 @@ class MainWindow(QMainWindow):
             self.thinking_mode_combo.addItem(label, value)
         self.thinking_mode_combo.setToolTip("仅用于服务商明确支持的 Chat Completions 模型。Qwen 发送 enable_thinking，DeepSeek 发送 thinking.type；不根据模型名自动启用。MiMo 或中转站仅在文档确认参数相同后使用。")
         advanced_form.add_field("供应商思考开关", self.thinking_mode_combo)
+        self.native_auth_combo = QComboBox()
+        self.native_auth_combo.addItem("API Key 请求头（原生接口）", "api_key")
+        self.native_auth_combo.addItem("Bearer Token（原生接口）", "bearer")
+        advanced_form.add_field("原生接口认证", self.native_auth_combo)
         self.document_concurrency_spin = QSpinBox()
         self.document_concurrency_spin.setRange(1, 6)
         self.document_rpm_spin = QSpinBox()
@@ -678,19 +756,15 @@ class MainWindow(QMainWindow):
         footer.setObjectName("footer")
         footer.setLayout(key_row)
         config_right_layout.addWidget(footer)
-
-        codex_row = QHBoxLayout()
-        import_button = QPushButton("导入 Codex")
-        import_button.clicked.connect(self._choose_codex_import)
-        export_button = QPushButton("导出当前供应商")
-        export_button.clicked.connect(self._choose_codex_export)
-        self.include_key_checkbox = QCheckBox("包含 API key（明文）")
-        self.include_key_checkbox.setToolTip("导出 Codex 配置时包含明文 API key")
-        codex_row.addWidget(import_button)
-        codex_row.addWidget(export_button)
-        codex_row.addStretch()
-        layout.addWidget(self.include_key_checkbox)
-        layout.addLayout(codex_row)
+        self.editor_feedback = QLabel()
+        self.editor_feedback.setTextFormat(Qt.TextFormat.PlainText)
+        self.editor_feedback.setWordWrap(True)
+        self.editor_feedback.setContentsMargins(18, 4, 18, 10)
+        self.editor_feedback.hide()
+        config_right_layout.addWidget(self.editor_feedback)
+        close_editor = QPushButton("完成")
+        close_editor.clicked.connect(self.provider_editor.reject)
+        key_row.addWidget(close_editor)
 
         self.activity = QTextBrowser()
         self.activity.setObjectName("activity")
@@ -702,8 +776,12 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(shell)
 
         self.documents = DocumentPage(self)
-        self.pages.addTab(self.documents, qta.icon("mdi6.file-document-outline", color="#66717d"), "文件翻译")
+        self.pages.addTab(self.documents, qta.icon("mdi6.file-document-outline", color="#626980"), "文件翻译")
         self.pages.currentChanged.connect(lambda _: self.activity.setVisible(self.pages.currentWidget() is not self.documents))
+
+        self.workbench = Workbench(self.pages, self.help_button, self.version_label,
+                                  self.game_badge, self.screen_badge, self.activity)
+        self.setCentralWidget(self.workbench)
 
         self.set_profiles(settings.providers, settings.active_provider)
         self.set_key_source(credential_source)
@@ -717,6 +795,29 @@ class MainWindow(QMainWindow):
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setWidget(widget)
         return area
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_work_area()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.isVisible():
+            self._fit_work_area()
+
+    def _fit_work_area(self):
+        if QApplication.platformName() != "windows" or self.isMaximized() or self.isFullScreen():
+            return
+        area = self.screen().availableGeometry()
+        width = max(self.minimumWidth(), min(self.width(), area.width() - 24))
+        height = max(self.minimumHeight(), min(self.height(), area.height() - 48))
+        if (width, height) != (self.width(), self.height()):
+            self.resize(width, height)
+        frame = self.frameGeometry()
+        x = max(area.left(), min(frame.left(), area.right() - frame.width() + 1))
+        y = max(area.top(), min(frame.top(), area.bottom() - frame.height() + 1))
+        if (x, y) != (frame.left(), frame.top()):
+            self.move(x, y)
 
     def _screen_intervals_changed(self) -> None:
         self.screen_intervals_changed.emit(self.ocr_interval_spin.value(), self.translation_interval_spin.value())
@@ -782,7 +883,7 @@ class MainWindow(QMainWindow):
         rows = []
         for line in message.splitlines():
             # These are presentation hints only; keep the diagnostic text intact.
-            color = "#20252b"
+            color = "#1C2238"
             if any(word in line for word in ("未启用", "停用", "暂停", "跳过")):
                 color = "#996000"
             elif any(word in line for word in ("失败", "未通过", "缺失", "HTTP 401", "HTTP 403")):
@@ -858,6 +959,7 @@ class MainWindow(QMainWindow):
 
     def _focus_model_tools(self):
         self.pages.setCurrentIndex(1)
+        self.open_provider_editor(self._editing_id)
         self.config_scroll.ensureWidgetVisible(self.fetch_models_button)
         self.fetch_models_button.setFocus()
 
@@ -878,12 +980,37 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, profile.id)
             active = profile.id == self._active_id
             item.setIcon(qta.icon("mdi6.check-circle-outline" if active else "mdi6.server-outline",
-                                  color="#16845b" if active else "#66717d"))
+                                  color="#147A50" if active else "#626980"))
             item.setToolTip(("正在使用\n" if active else "") + profile.name + "\n" + profile.base_url)
             self.provider_list.addItem(item)
             if profile.id == self._editing_id:
                 self.provider_list.setCurrentItem(item)
         self.provider_list.blockSignals(False)
+        self.dashboard.set_profiles(list(self._profiles.values()), self._active_id)
+
+    def open_provider_editor(self, identity):
+        index = self.provider_combo.findData(identity)
+        if index < 0:
+            return
+        self.provider_combo.setCurrentIndex(index)
+        if self._editing_id != identity:
+            return
+        self.dashboard.viewed_id = identity
+        self.dashboard.render_cards()
+        self.editor_feedback.hide()
+        self.provider_editor.setWindowTitle("编辑供应商 · " + self._profiles[identity].name)
+        area = self.screen().availableGeometry()
+        self.provider_editor.resize(min(800, area.width()-40), min(680, area.height()-60))
+        self.provider_editor.show()
+        self.provider_editor.raise_()
+        self.provider_name_edit.setFocus()
+        self.config_scroll.verticalScrollBar().setValue(0)
+
+    def _delete_from_card(self, identity):
+        profile = self._profiles.get(identity)
+        if profile and QMessageBox.question(self, "删除配置", "删除所选供应商配置？不会删除翻译历史和输出文件。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self.delete_provider_requested.emit(identity)
 
     def _list_selected(self, item, previous) -> None:
         if item:
@@ -902,7 +1029,8 @@ class MainWindow(QMainWindow):
                     chat_token_parameter=self.chat_token_parameter_combo.currentData(),
                     instruction_role=self.instruction_role_combo.currentData(),
                     reasoning_effort=self.reasoning_effort_combo.currentData(),
-                    thinking_mode=self.thinking_mode_combo.currentData())
+                    thinking_mode=self.thinking_mode_combo.currentData(),
+                    native_auth=self.native_auth_combo.currentData())
 
     def mark_saved(self):
         self._saved_form = self._form_values()
@@ -989,7 +1117,7 @@ class MainWindow(QMainWindow):
         self.key_visibility_action.setToolTip(label)
         self.key_visibility_action.setIcon(qta.icon(
             "mdi6.eye-off-outline" if visible else "mdi6.eye-outline",
-            color="#68717d",
+            color="#626980",
         ))
 
     def _hide_key(self) -> None:
@@ -1028,7 +1156,7 @@ class MainWindow(QMainWindow):
         self.env_key_edit.setText(profile.env_key)
         index = self.api_mode_combo.findData(profile.api_mode)
         self.api_mode_combo.setCurrentIndex(max(0, index))
-        self.editing_label.setText("编辑配置 · " + profile.name)
+        self.editing_label.setText("连接信息")
         self.favorite_check.setChecked(profile.favorite)
         self._favorite_models = list(profile.favorite_models)
         self.set_models(profile.models)
@@ -1042,7 +1170,8 @@ class MainWindow(QMainWindow):
         for combo, value in ((self.chat_token_parameter_combo, profile.chat_token_parameter),
                              (self.instruction_role_combo, profile.instruction_role),
                              (self.reasoning_effort_combo, profile.reasoning_effort),
-                             (self.thinking_mode_combo, profile.thinking_mode)):
+                             (self.thinking_mode_combo, profile.thinking_mode),
+                             (self.native_auth_combo, profile.native_auth)):
             combo.setCurrentIndex(max(0, combo.findData(value)))
         self.mark_saved()
 
@@ -1118,42 +1247,6 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self.delete_key_requested.emit(provider_id)
 
-    def _choose_codex_import(self) -> None:
-        if not self.confirm_discard():
-            return
-        selected, _ = QFileDialog.getOpenFileName(
-            self,
-            "导入 Codex 配置",
-            str(default_codex_config_path()),
-            "Codex 配置 (config.toml *.toml);;所有文件 (*)",
-        )
-        if selected:
-            self.import_codex_requested.emit(selected)
-
-    def _choose_codex_export(self) -> None:
-        provider_id = self.provider_combo.currentData() or "provider"
-        default_path = str(Path.home() / "Documents" / f"{provider_id}-codex.toml")
-        selected, _ = QFileDialog.getSaveFileName(
-            self,
-            "导出 Codex 配置",
-            default_path,
-            "Codex 配置 (*.toml)",
-        )
-        if not selected:
-            return
-        include_key = self.include_key_checkbox.isChecked()
-        if include_key:
-            answer = QMessageBox.warning(
-                self,
-                "密钥将以明文导出",
-                "导出的 TOML 文件将包含当前 API key。请勿分享或提交该文件。是否继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        self.export_codex_requested.emit(provider_id, selected, include_key)
-
     def _toggle_paused(self) -> None:
         self.pause_requested.emit(False if self._trigger_error else not self._paused)
 
@@ -1191,6 +1284,10 @@ class MainWindow(QMainWindow):
     def set_activity(self, message: str, *, error: bool = False) -> None:
         color = "#a32929" if error else "#202124"
         self.activity.setHtml(f'<span style="color:{color}">{_html_escape(message)}</span>')
+        if self.provider_editor.isVisible():
+            self.editor_feedback.setText(message)
+            self.editor_feedback.setStyleSheet(f"color:{color};font-size:13px;")
+            self.editor_feedback.show()
 
     def settings_saved(
         self,

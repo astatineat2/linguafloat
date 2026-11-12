@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QMessage
                               QProgressBar, QPushButton, QTabWidget, QTextBrowser, QVBoxLayout, QWidget)
 
 from linguafloat import __version__
+from linguafloat.workbench import AppDialog, MessageBox as QMessageBox
 from linguafloat.update_core import (UpdateError, atomic_json, check_latest, download_release,
                                     load_channel, parse_manifest, update_directory)
 
@@ -29,11 +30,24 @@ GUIDE = """
 <p>解压完整便携 ZIP 后启动 <b>LinguaFloat.exe</b>。无需安装 Python；不要移动或删除
 <code>_internal</code>、<code>document-runtime</code> 和更新助手。</p>
 <h3>1 · 添加翻译服务</h3>
-<p>打开“配置设置”，填写供应商、接口地址、API Key、模型，并按供应商文档选择
-Responses API 或 Chat Completions。保存后，在“功能设置”启用该配置。</p>
+<p>首次启动可在“配置翻译服务”单页选择服务、填写 API Key 和模型，点击“完成并保存”后启用；
+也可“跳过，稍后配置”，后续从“配置设置 → 添加供应商”继续添加。保存和跳过后不会再次自动弹出。</p>
+<p>打开“配置设置 → 添加供应商 → 自定义”，填写供应商、接口地址、API Key、模型，并按供应商文档选择
+Responses、Chat Completions、Anthropic Messages 或 Gemini generateContent。保存后，在卡片或“功能设置”明确启用该配置。</p>
+<p>配置页直接显示全部供应商卡片，可搜索名称、地址和模型。右上方“数据管理”与“添加供应商”并排，数据管理页可返回全部配置。
+点击“数据管理 → 选择 SQL 文件”，一次导入文件中全部类别的兼容配置，无需逐条勾选。
+重复项跳过，缺失项在结果详情中点击“补全”。本机配置直接读取入口已移除，使用 CC Switch 导出的 SQL 文件交换。
+导入不自动启用，不测试连接。网页登录、托管凭据或不支持的协议会明确说明限制。</p>
+<p>“导出 SQL 备份”仅包含兼容供应商和必要结构，目标格式为 CC Switch SQL。
+目标端会替换整库，请先备份。默认不包含密钥，主动勾选“包含 API Key”才写入明文密钥。
+官方程序隔离恢复尚未实测。OpenCode 官方模型服务可从“添加供应商”菜单配置。</p>
 <p>点击“测试连接”会发送一次真实短文本请求，可能产生 API 费用。首次启动不会自动测试、
 翻译或上传文件。请确认供应商的隐私政策。</p>
 <h3>2 · 选择翻译方式</h3>
+<p>快捷键框点击后直接按组合键录入，Esc 取消，录入后点击底部“保存功能设置”。冲突会显示原因，不替换旧快捷键。
+区域框四角与四边中点缩放，其余绿色边框拖动平移；点击浮窗“移动识别区域”可在框内拖动。
+框选稳定约 1 秒后开始 OCR；译文分段显示。浮窗计时图标可调整识别与翻译最短间隔，设置同步到主界面。
+首次 OCR 初始化和供应商响应仍需时间；分段请求可能比整段请求增加提示词开销。</p>
 <p><b>选中翻译：</b>选中文字后按 Ctrl+Alt+T，或使用右键翻译入口。<br>
 <b>输入翻译：</b>默认快捷键 Ctrl+Alt+Y，可在功能设置修改。<br>
 <b>区域翻译：</b>选择屏幕区域，本地 OCR 后发送文字翻译；可暂停、继续、移动和缩放。
@@ -63,7 +77,7 @@ API Key 使用 Windows 凭据管理器或指定的环境变量，不放进软件
 """
 
 
-class HelpDialog(QDialog):
+class HelpDialog(AppDialog):
     check_requested = Signal()
     download_requested = Signal()
     install_requested = Signal()
@@ -77,6 +91,7 @@ class HelpDialog(QDialog):
         self.setWindowTitle(f"LinguaFloat v{__version__} · 帮助与更新")
         self.setMinimumSize(620, 460)
         self.resize(740, 600)
+        self.finished.connect(lambda _: self.guide_closed.emit())
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
@@ -101,6 +116,7 @@ class HelpDialog(QDialog):
         body.addWidget(self.progress)
         actions = QHBoxLayout()
         self.check_button = QPushButton("检查更新")
+        self.check_button.setObjectName("primary")
         self.download_button = QPushButton("下载更新")
         self.download_button.setEnabled(False)
         self.install_button = QPushButton("安装并重启")
@@ -116,7 +132,14 @@ class HelpDialog(QDialog):
         body.addLayout(actions)
         self.tabs.addTab(updates, "软件更新")
         self.guide = QTextBrowser()
-        self.guide.setHtml(GUIDE)
+        notice_root = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
+        notice_url = QUrl.fromLocalFile(str(notice_root / "THIRD_PARTY_NOTICES.md")).toString()
+        license_url = QUrl.fromLocalFile(str(notice_root / "LICENSE")).toString()
+        self.guide.setHtml(GUIDE + '<p style="color:#66717d;font-size:small">LinguaFloat：AGPL-3.0-only，可依许可再分发，无担保。'
+                          f'<a href="{license_url}">许可证</a> · <a href="{notice_url}">开源致谢与第三方声明</a> · '
+                          '<a href="https://github.com/astatineat2/linguafloat-releases/releases">公开版本对应源码</a></p>')
+        self.guide.setOpenLinks(False)
+        self.guide.anchorClicked.connect(QDesktopServices.openUrl)
         configure = QPushButton("打开配置设置")
         configure.clicked.connect(self.configure_requested)
         body_guide = QWidget()
@@ -124,19 +147,11 @@ class HelpDialog(QDialog):
         guide_layout.addWidget(self.guide, 1)
         guide_layout.addWidget(configure, alignment=Qt.AlignmentFlag.AlignLeft)
         self.tabs.addTab(body_guide, "首次使用指南")
-        licenses = QTextBrowser()
-        licenses.setPlainText("LinguaFloat 的适用源码按 AGPL-3.0 提供。第三方组件保留各自许可证。\n"
-                              "BabelDOC、PDFMathTranslate-next、PyMuPDF：AGPL。Qt for Python：LGPL/GPL。\n"
-                              "完整声明、依赖清单和对应源码获取方式见便携包 LICENSES 与 THIRD_PARTY_NOTICES.md。\n\n"
-                              "源码开发仓库私有；正式公开发布时提供对应源码包。\n"
-                              "当前程序未做 Windows Authenticode 签名；更新包另使用发布签名进行校验。")
-        self.tabs.addTab(licenses, "许可证")
         close = QPushButton("关闭")
         close.clicked.connect(self.close)
         layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
 
     def closeEvent(self, event):
-        self.guide_closed.emit()
         super().closeEvent(event)
 
 
@@ -187,7 +202,6 @@ class HelpController(QObject):
         self.dialog.install_requested.connect(self.install)
         self.dialog.cancel_download_requested.connect(self.cancel_action)
         self.dialog.auto_changed.connect(self._auto_changed)
-        self.dialog.guide_closed.connect(self._guide_closed)
         self.dialog.configure_requested.connect(self._configure)
 
     def _configure(self):
@@ -212,7 +226,8 @@ class HelpController(QObject):
 
     def start(self):
         if not self.app.settings.first_run_complete:
-            self.show(guide=True)
+            self.app._show_first_run()
+            return
         if self.app.settings.update_auto_check:
             QTimer.singleShot(4000, self.check)
 
@@ -225,11 +240,6 @@ class HelpController(QObject):
     def _auto_changed(self, enabled):
         self.app.settings.update_auto_check = enabled
         self.app.config_store.save(self.app.settings)
-
-    def _guide_closed(self):
-        if not self.app.settings.first_run_complete:
-            self.app.settings.first_run_complete = True
-            self.app.config_store.save(self.app.settings)
 
     def check(self, *, manual=False):
         if self.busy or self.install_pending:

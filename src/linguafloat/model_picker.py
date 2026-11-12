@@ -36,12 +36,12 @@ class ModelMenu(QFrame):
         self.setObjectName("modelMenu")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(APP_STYLESHEET + """
-            QFrame#modelMenu { background: white; border: 1px solid #d9e0e7; border-radius: 8px; }
-            QLabel#menuTitle { color: #66717d; font-size: 13px; }
-            QLineEdit#modelSearch { border: 1px solid #d9e0e7; border-radius: 6px; padding: 5px 8px; min-height: 24px; }
+            QFrame#modelMenu { background: white; border: 1px solid #DDE0E9; border-radius: 6px; }
+            QLabel#menuTitle { color: #626980; font-size: 13px; }
+            QLineEdit#modelSearch { border: 1px solid #DDE0E9; border-radius: 6px; padding: 5px 8px; min-height: 24px; }
             QListWidget#modelChoices { padding: 0; border: 0; }
             QListWidget::item { padding: 6px 10px; margin: 0; }
-            QListWidget::item:hover, QListWidget::item:selected { background: #f0f2f5; color: #20252b; }
+            QListWidget::item:hover, QListWidget::item:selected { background: #EEECFB; color: #1C2238; }
             QPushButton { text-align: left; border: 0; }
         """)
         layout = QVBoxLayout(self)

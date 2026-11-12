@@ -9,8 +9,11 @@ def test_guide_can_be_reopened_and_does_not_call_translation(controller, applica
     app.settings.update_auto_check = False
     app.settings.first_run_complete = False
     app.help.start()
-    assert app.help.dialog.isVisible()
-    assert app.help.dialog.tabs.currentIndex() == 1
+    assert app.first_run_dialog.isVisible()
+    assert not app.help.dialog.isVisible()
+    app.first_run_dialog.skip_button.click()
+    assert app.settings.first_run_complete
+    app.help.show(guide=True)
     application.processEvents()
     assert app.help.dialog.guide.isVisibleTo(app.help.dialog)
     assert "开始使用 LinguaFloat" in app.help.dialog.guide.toPlainText()

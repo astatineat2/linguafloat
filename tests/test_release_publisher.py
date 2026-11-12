@@ -59,3 +59,19 @@ def test_resume_only_publishes_matching_complete_draft(publisher, corrupt):
             module.publish(client)
     assert not any(r.method in {"POST", "DELETE"} for r in calls)
     assert sum(r.method == "PATCH" for r in calls) == (0 if corrupt else 1)
+
+
+def test_repository_creation_keeps_development_private(publisher):
+    module, _ = publisher
+    created = []
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(404)
+        body = json.loads(request.content)
+        created.append(body)
+        return httpx.Response(201, json={"private": body["private"],
+            "html_url": "https://github.com/astatineat2/" + body["name"]})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        module.ensure_repositories(client)
+    assert [(b["name"], b["private"]) for b in created] == [
+        ("linguafloat", True), ("linguafloat-releases", False)]

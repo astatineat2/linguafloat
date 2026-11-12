@@ -40,6 +40,29 @@ def normalize(text):
     return re.sub(r"\W+", "", text).casefold()
 
 
+def join_ocr_lines(lines):
+    """Remove line-break artifacts, never guess missing letters or cross regions."""
+    result = ""
+    known_words = set(re.findall(r"\b[A-Za-z]{4,}\b", " ".join(l["text"] for l in lines)))
+    for line in lines:
+        text = line["text"].strip()
+        if not result:
+            result = text
+            continue
+        if result.endswith("\u00ad"):
+            result = result[:-1] + text
+        elif result.endswith("-") and re.match(r"[a-z]", text):
+            left = re.search(r"([A-Za-z]+)-$", result)
+            right = re.match(r"([a-z]+)", text)
+            combined = (left[1] + right[1]) if left and right else ""
+            # Ordinary hyphens are ambiguous; remove only with evidence from
+            # another complete occurrence in this same OCR region.
+            result = result[:-1] + text if combined in known_words else result + text
+        else:
+            result += " " + text
+    return result
+
+
 def risky_math(text):
     # Inline equations are deliberately retained until their glyph positions can
     # be preserved independently from translated prose.
@@ -90,7 +113,7 @@ class ScanAnalyzer:
             areas.append(dict(label=prediction.names[int(item.cls)], confidence=float(item.conf),
                               box=[float(v) / 2 for v in item.xyxy]))
         self.emit({"type": "measurement", "name": "扫描页版面识别", "seconds": active_clock(self.translator.control) - started})
-        if store:
+        if store and lines:
             store.put(key, json.dumps(dict(lines=lines, areas=areas), ensure_ascii=False))
         return recover_regions(page, build_regions(page, kind, lines, areas), self, digest)
 
@@ -173,7 +196,7 @@ def build_regions(page, kind, lines, areas):
         for line in group[1:]:
             rect |= fitz.Rect(line["box"])
         regions.append(dict(box=list((rect + (-1.5, -1.5, 1.5, 1.5)) & page.rect),
-                            text=" ".join(l["text"] for l in group), lines=group, label=label, reason=reason))
+                            text=join_ocr_lines(group), lines=group, label=label, reason=reason))
 
     for area in areas:
         if area["label"] not in allowed:
@@ -203,7 +226,15 @@ def build_regions(page, kind, lines, areas):
                 reason = "本行与可见数字文字层相交，无法安全分离"
             elif risky_math(line["text"]):
                 reason = "本行包含公式符号，保留本行以保护公式及上下标"
-            if group and reason != previous:
+            separated = False
+            if group:
+                last = fitz.Rect(group[-1]["box"])
+                # A detector can put two columns/paragraphs inside one region.
+                # Keep separate ownership rather than joining by proximity alone.
+                horizontal_overlap = min(box.x1, last.x1) - max(box.x0, last.x0)
+                separated = (box.y0 - last.y1 > max(last.height, box.height) * .9 or
+                             horizontal_overlap <= 0)
+            if group and (reason != previous or separated):
                 add(group, area["label"], previous)
                 group = []
             group.append(line)
@@ -300,8 +331,11 @@ def fit_translation(page, region, text, target, control):
         return None
     lines = region["lines"]
     size = max(6, min(24, median(l["box"][3] - l["box"][1] for l in lines) * 1.25))
-    spans = [s for b in page.get_text("dict", clip=fitz.Rect(region["box"]))["blocks"]
-             for line in b.get("lines", []) for s in line["spans"] if s.get("size", 0) > 0]
+    # A searchable scan's invisible OCR font can have arbitrary metrics. Only
+    # visible native glyphs contained in this region may override raster height.
+    box = fitz.Rect(region["box"])
+    spans = [s for s in page.get_texttrace() if s.get("type") != 3 and s.get("opacity", 1) > 0
+             and s.get("size", 0) > 0 and box.contains(fitz.Rect(s["bbox"]))]
     if spans:
         size = median(s["size"] for s in spans)
     for scale in font_scales(size):
@@ -357,15 +391,32 @@ def fit_single_line(page, region, text, font, size):
 
 def translate_scan_page(source, number, kind, analyzer, digest, translator, emit):
     import pymupdf as fitz
+    from linguafloat.document_failures import diagnostic
     page = source[number]
-    regions = analyzer.regions(page, kind, digest)
+    try:
+        regions = analyzer.regions(page, kind, digest)
+    except Exception as error:
+        issue = diagnostic(error, "OCR/版面识别")
+        result = fitz.open()
+        result.insert_pdf(source, from_page=number, to_page=number)
+        return result, [dict(issue, box=list(page.rect), coordinates="top-left", status="untranslated")], []
+    if not regions:
+        result = fitz.open()
+        result.insert_pdf(source, from_page=number, to_page=number)
+        return result, [dict(box=list(page.rect), coordinates="top-left", status="untranslated",
+                            stage="OCR", reason="扫描页未取得可定位文字，保留整页原图；无法判断全部漏识别位置")], []
     boundary = getattr(translator.job, "reference_boundary", {}) if getattr(translator.job, "skip_references", False) else {}
-    if boundary and number == boundary["page"]:
-        boxes = [fitz.Rect(box) for box in boundary["boxes"]]
-        if any(any(fitz.Rect(region["box"]).intersects(box) and not box.contains(fitz.Rect(region["box"]))
-                   for box in boxes) for region in regions if region["text"].strip()):
-            raise DocumentError(f"第 {number + 1} 页扫描识别区域跨越参考文献边界，无法安全跳过；未翻译该页。")
+    from linguafloat.document_references import reference_boxes
+    if reference_boxes(boundary, number):
+        boxes = [fitz.Rect(box) for box in reference_boxes(boundary, number)]
+        for region in regions:
+            if any(fitz.Rect(region["box"]).intersects(box) and not box.contains(fitz.Rect(region["box"])) for box in boxes):
+                region["reason"] = "扫描区域跨越参考文献边界；保留该区域原图，其他区域继续翻译"
         regions = [region for region in regions if not any(box.contains(fitz.Rect(region["box"])) for box in boxes)]
+    if hasattr(translator, "set_source_context"):
+        from linguafloat.document_context import SourceBlock
+        translator.set_source_context((*translator.source_context.blocks, *(SourceBlock(
+            r["text"], r.get("label", "body")) for r in regions if not r.get("reason"))))
     retained, placed = [], []
     result = fitz.open()
     result.insert_pdf(source, from_page=number, to_page=number)
@@ -377,21 +428,35 @@ def translate_scan_page(source, number, kind, analyzer, digest, translator, emit
                   "work_done": i, "work_total": len(regions), "value": None,
                   "message": f"保留版式：第 {number + 1} 页，区域 {i + 1}/{len(regions)}"})
             patch = None
+            details = {}
             if not reason:
-                patch, reason = ink_patch(page, region)
+                try:
+                    patch, reason = ink_patch(page, region)
+                except Exception as error:
+                    details = diagnostic(error, "原图区域分析")
+                    reason = details.pop("reason")
             translation = None
             if not reason:
                 translator.location = f"扫描 PDF 第 {number + 1} 页，区域 {i + 1}"
-                if region.get("context") and hasattr(translator, "translate_fragment"):
-                    translation = translator.translate_fragment(region["text"], region["context"])
-                else:
-                    translation = translator.translate(region["text"])
-                translator.control.checkpoint()
-                fitted = fit_translation(page, region, translation, translator.job.target, translator.control)
-                if fitted is None:
-                    reason = "译文在原框及字号下限内无法完整排入，未扩大页面或新增续页"
+                stage = "翻译"
+                try:
+                    if region.get("context") and hasattr(translator, "translate_fragment"):
+                        translation = translator.translate_fragment(region["text"], region["context"])
+                    else:
+                        translation = translator.translate(region["text"])
+                    translator.control.checkpoint()
+                    if hasattr(translator, "graphic_context"):
+                        translator.graphic_context.remember(number, region["text"], translation,
+                                                            region.get("label", "body"))
+                    stage = "排版"
+                    fitted = fit_translation(page, region, translation, translator.job.target, translator.control)
+                    if fitted is None:
+                        reason = "译文在原框及字号下限内无法完整排入，未扩大页面或新增续页"
+                except Exception as error:
+                    details = diagnostic(error, stage)
+                    reason = details.pop("reason")
             if reason:
-                retained.append(dict(box=region["box"], source=region["text"], translation=translation,
+                retained.append(dict(box=region["box"], **details,
                                      reason=reason, status="preserved" if region.get("preserved") else "untranslated",
                                      coordinates="top-left"))
                 continue
@@ -417,7 +482,8 @@ def translate_mixed_layout_pdf(job, translator, output, emit, pages, kinds):
     with open(job.source, "rb") as handle:
         digest = hashlib.file_digest(handle, "sha256").hexdigest()
     boundary = job.reference_boundary if job.skip_references else {}
-    digital = [p for p in pages if kinds[p] == "digital" and (not boundary or p <= boundary["page"])]
+    from linguafloat.document_references import reference_page_only
+    digital = [p for p in pages if kinds[p] == "digital" and not reference_page_only(boundary, p)]
     digital_path = None
     report = dict(mode="strict_layout", minimum_body_pt=6, pages={str(p + 1): kinds[p] for p in pages},
                   untranslated_regions={}, preserved_regions={}, paragraphs=[], warnings=[], continuations={}, margin_references={})
@@ -425,7 +491,7 @@ def translate_mixed_layout_pdf(job, translator, output, emit, pages, kinds):
         folder = output / "digital"
         folder.mkdir()
         subjob = replace(job, pages=",".join(str(p + 1) for p in digital), trial=False, mono=True, bilingual=False)
-        paths, warnings = _translate_layout_pdf(subjob, translator, folder, emit)
+        paths, warnings = _translate_layout_pdf(subjob, translator, folder, emit, defer_graphics=True)
         digital_path = paths[0]
         digital_report = json.loads((folder / "layout-report.json").read_text(encoding="utf-8"))
         report["untranslated_regions"].update(digital_report.get("untranslated_regions", {}))
@@ -439,12 +505,10 @@ def translate_mixed_layout_pdf(job, translator, output, emit, pages, kinds):
     with open_document(job.source) as source, fitz.open() as mono, fitz.open() as dual:
         for number in pages:
             translator.control.checkpoint()
-            if boundary and number > boundary["page"]:
+            if reference_page_only(boundary, number):
                 with fitz.open() as fragment:
                     fragment.insert_pdf(source, from_page=number, to_page=number)
                     mono.insert_pdf(fragment)
-                    if job.bilingual:
-                        append_bilingual(dual, source, number, fragment, job.bilingual_layout)
                 continue
             emit({"type": "progress", "stage": "OCR 中", "value": None,
                   "message": f"保留版式预检：第 {number + 1} 页（{kinds[number]}）"})
@@ -474,9 +538,17 @@ def translate_mixed_layout_pdf(job, translator, output, emit, pages, kinds):
                 if len(fragment) != 1 or fragment[0].rect != source[number].rect:
                     raise DocumentError(f"[保留版式尺寸校验失败] 原始第 {number + 1} 页，已停止发布。")
                 if number not in digital:
-                    enhancer.apply(source[number],fragment[0])
+                    from linguafloat.document_failures import mark_pdf
+                    mark_pdf(fragment[0], report["untranslated_regions"].get(str(number), []), number)
                 mono.insert_pdf(fragment)
-                if job.bilingual:
+        # Every selected page's body is now available as bounded label context.
+        for index, number in enumerate(pages):
+            translator.control.checkpoint()
+            if not reference_page_only(boundary, number):
+                enhancer.apply(source[number], mono[index])
+            if job.bilingual:
+                with fitz.open() as fragment:
+                    fragment.insert_pdf(mono, from_page=index, to_page=index)
                     append_bilingual(dual, source, number, fragment, job.bilingual_layout)
         paths = []
         for enabled, label, document in ((job.mono, "译文", mono), (job.bilingual, "双语", dual)):

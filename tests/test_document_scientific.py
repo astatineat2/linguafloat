@@ -155,7 +155,7 @@ def test_invalid_fragment_reply_evicts_only_its_cache_entry(tmp_path):
         store.put("valid", "保持有效译文")
         translator = NS(store=store, cache_key=lambda _: "invalid", messages=lambda _: [dict(content="Translate"), dict(content="")],
                         request=lambda *a, **kw: "[]")
-        with pytest.raises(DocumentError, match="片段编号"):
+        with pytest.raises(DocumentError, match="片段数量"):
             translate_formula_segments(ti, translator)
         assert store.get("invalid") is None
         assert store.get("valid") == "保持有效译文"

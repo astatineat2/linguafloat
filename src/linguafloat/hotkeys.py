@@ -31,6 +31,14 @@ _MODIFIERS = {
     "meta": ("Win", "<cmd>"),
 }
 _MODIFIER_ORDER = ("Ctrl", "Alt", "Shift", "Win")
+_NAMED_KEYS = {
+    "left": ("Left", "left", 0x25), "up": ("Up", "up", 0x26),
+    "right": ("Right", "right", 0x27), "down": ("Down", "down", 0x28),
+    "home": ("Home", "home", 0x24), "end": ("End", "end", 0x23),
+    "pageup": ("PageUp", "page_up", 0x21), "pagedown": ("PageDown", "page_down", 0x22),
+    "space": ("Space", "space", 0x20), "insert": ("Insert", "insert", 0x2D),
+    "delete": ("Delete", "delete", 0x2E),
+}
 
 
 def parse_hotkey(value: str) -> HotkeySpec:
@@ -53,14 +61,17 @@ def parse_hotkey(value: str) -> HotkeySpec:
         raise HotkeyError("快捷键必须包含且只包含一个普通按键。")
 
     key = regular_keys[0]
-    if len(key) == 1 and key.isalnum():
+    if len(key) == 1 and key.isascii() and key.isalnum():
         display_key = key.upper()
         pynput_key = key.lower()
-    elif key.startswith("f") and key[1:].isdigit() and 1 <= int(key[1:]) <= 12:
+    elif key.startswith("f") and key[1:].isdigit() and 1 <= int(key[1:]) <= 24:
         display_key = key.upper()
         pynput_key = f"<{key}>"
+    elif key in _NAMED_KEYS:
+        display_key, native_name, _ = _NAMED_KEYS[key]
+        pynput_key = f"<{native_name}>"
     else:
-        raise HotkeyError("普通按键仅支持字母、数字或 F1-F12。")
+        raise HotkeyError("支持字母、数字、F1-F24、方向键、空格和导航键。")
 
     ordered = [name for name in _MODIFIER_ORDER if name in modifiers]
     display = "+".join([*ordered, display_key])
@@ -85,9 +96,12 @@ class WindowsHotkey(QAbstractNativeEventFilter):
         for name in parts[:-1]:
             modifiers |= {"Ctrl": 0x0002, "Alt": 0x0001, "Shift": 0x0004, "Win": 0x0008}[name]
         key = parts[-1]
-        vk = 0x70 + int(key[1:]) - 1 if len(key) > 1 and key.startswith("F") else ord(key)
+        vk = (_NAMED_KEYS[key.lower()][2] if key.lower() in _NAMED_KEYS else
+              0x70 + int(key[1:]) - 1 if len(key) > 1 and key.startswith("F") else ord(key))
         if not self.user32.RegisterHotKey(None, self.identifier, modifiers, vk):
-            raise HotkeyError(f"无法注册快捷键 {spec.display}，可能已被其他软件占用。")
+            code = ctypes.get_last_error()
+            reason = "已被其他程序或系统占用" if code == 1409 else f"Windows 注册失败（错误 {code}）"
+            raise HotkeyError(f"无法注册快捷键 {spec.display}：{reason}。")
         self.application.installNativeEventFilter(self)
 
     def nativeEventFilter(self, event_type, message):

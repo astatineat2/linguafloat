@@ -71,7 +71,7 @@ class OpenAITranslator:
         try:
             if self.profile.api_mode == "responses":
                 translated = self._translate_with_responses(source_text)
-            elif self.profile.api_mode == "chat_completions":
+            elif self.profile.api_mode in {"chat_completions", "anthropic", "gemini"}:
                 translated = self._translate_with_chat_completions(source_text)
             else:
                 raise TranslationError("不支持的 API 接口类型。")

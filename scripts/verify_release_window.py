@@ -49,10 +49,30 @@ assert all(page in names for page in ("功能设置", "配置设置", "文件翻
 sys.stdout.reconfigure(encoding="utf-8")
 print("Verified version in title and all three page entries: " + window.Name)
 tab = next(x for x, _ in auto.WalkControl(window, maxDepth=12)
-           if x.Name == args.page and x.ControlTypeName == "TabItemControl")
+           if x.Name == args.page and x.ControlTypeName in ("ListItemControl", "TabItemControl"))
 selection = tab.GetSelectionItemPattern()
-if not selection.IsSelected:
+if tab.ControlTypeName == "ListItemControl":
+    window.SetActive()
+    tab.Click()
+elif not selection.IsSelected:
     selection.Select()
+time.sleep(.25)
+if tab.ControlTypeName == "ListItemControl":
+    expected_location = "工作台  /  " + args.page
+    def page_visible():
+        return any(c.Name == expected_location and not c.IsOffscreen
+                   for c, _ in auto.WalkControl(window, maxDepth=12))
+    deadline = time.monotonic() + 2
+    while not page_visible() and time.monotonic() < deadline:
+        time.sleep(.1)
+    if not page_visible():
+        navigation = next(c for c, _ in auto.WalkControl(window, maxDepth=12)
+                          if c.Name == "应用导航" and c.ControlTypeName == "ListControl")
+        navigation.SetFocus()
+        navigation.SendKeys("{Home}" + "{Down}" * ("功能设置", "配置设置", "文件翻译").index(args.page))
+        time.sleep(.3)
+        print("Mouse click did not switch the visible page; native keyboard navigation used.")
+    assert page_visible(), "Navigation did not display the requested page"
 if args.advanced and args.page == "配置设置":
     control = next(x for x, _ in auto.WalkControl(window, maxDepth=15)
                    if x.Name == "高级设置" and x.ControlTypeName == "CheckBoxControl")

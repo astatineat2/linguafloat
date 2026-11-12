@@ -122,9 +122,7 @@ def repair_frontmatter(source, page, translator):
         translator.control.checkpoint()
         rect = fitz.Rect(plan["box"])
         kind = plan["kind"]
-        if kind == "authors":
-            fitted = None
-        else:
+        def prepare():
             texts = []
             for line in plan["lines"]:
                 text = line["text"]
@@ -143,10 +141,18 @@ def repair_frontmatter(source, page, translator):
             fitted = centered_overlay(page,plan,texts,translator.job.target,translator.control)
             if not fitted:
                 raise DocumentError(f"[论文信息排版失败] 第 {source.number+1} 页 {kind}：无法在原页安全区域内完整排入。译文缓存已保留。")
+            return fitted
+        issue = {}
+        try:
+            fitted = None if kind == "authors" else prepare()
+        except Exception as error:
+            from linguafloat.document_failures import diagnostic
+            issue = diagnostic(error, "论文信息翻译/排版")
+            fitted = None
         # This band is source-verified metadata, with neighboring body/footer excluded.
         page.add_redact_annot(rect,fill=False,cross_out=False)
         page.apply_redactions(images=0,graphics=0,text=0)
-        if kind == "authors":
+        if fitted is None:
             page.show_pdf_page(rect,source.parent,source.number,clip=rect)
         else:
             with fitz.open(stream=fitted[0],filetype="pdf") as overlay:
@@ -155,5 +161,6 @@ def repair_frontmatter(source, page, translator):
                 for line in plan["lines"]:
                     for url in re.findall(r"https?://[^\s]+",line["text"]):
                         page.insert_link({"kind":fitz.LINK_URI,"from":rect,"uri":url})
-        records.append(dict(page=source.number+1,kind=kind,box=list(rect),**(fitted[1] if fitted else {})))
+        records.append(dict(page=source.number+1,kind=kind,box=list(rect),
+            **(dict(issue, status="untranslated", coordinates="top-left") if issue else (fitted[1] if fitted else {}))))
     return records

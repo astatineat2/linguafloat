@@ -1,6 +1,48 @@
 """Responsive, unframed settings fields shared by desktop pages."""
 from PySide6.QtCore import QEvent
-from PySide6.QtWidgets import QWidget, QGridLayout, QVBoxLayout, QLabel, QLayout, QSizePolicy
+from PySide6.QtWidgets import QWidget, QGridLayout, QVBoxLayout, QLabel, QLayout, QSizePolicy, QComboBox
+
+
+class ActionBar(QWidget):
+    """Wrap real actions into rows without squeezing their labels."""
+    def __init__(self, buttons, parent=None):
+        super().__init__(parent)
+        self.buttons = list(buttons)
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(8)
+        self.columns = 0
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.reflow()
+
+    def reflow(self):
+        widths = [max(b.sizeHint().width(), b.minimumSizeHint().width()) for b in self.buttons]
+        columns = len(widths)
+        while columns > 1:
+            track_widths = [max(widths[i::columns]) for i in range(columns)]
+            if sum(track_widths) + 8 * (columns - 1) <= self.width():
+                break
+            columns -= 1
+        if columns == self.columns:
+            return
+        for button in self.buttons:
+            self.grid.removeWidget(button)
+        for i in range(len(widths) + 1):
+            self.grid.setColumnStretch(i, 0)
+        for i, button in enumerate(self.buttons):
+            self.grid.addWidget(button, i // columns, i % columns)
+        self.grid.setColumnStretch(columns, 1)
+        self.columns = columns
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reflow()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange and hasattr(self, "buttons"):
+            self.columns = 0
+            self.reflow()
 
 
 class FieldGrid(QWidget):
@@ -8,8 +50,8 @@ class FieldGrid(QWidget):
         super().__init__(parent)
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setHorizontalSpacing(24)
-        self.grid.setVerticalSpacing(14)
+        self.grid.setHorizontalSpacing(20)
+        self.grid.setVerticalSpacing(12)
         self.fields = []
         self.visibility = {}
         self.columns = 0
@@ -33,7 +75,9 @@ class FieldGrid(QWidget):
                 self.visibility[control] = field
                 control.installEventFilter(self)
                 field.setVisible(not control.isHidden())
-            elif not wide:
+            elif not wide and not isinstance(control, QComboBox):
+                # Combo boxes include protocol/parameter names whose readable
+                # width varies with font metrics. Let the layout size them.
                 control.setMaximumWidth(280)
         field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.fields.append((field, wide))

@@ -33,7 +33,7 @@ def main():
     target_source.mkdir(parents=True, exist_ok=True)
     for name in ("__init__.py", "api_compat.py", "document_core.py", "document_metrics.py", "document_scheduler.py", "document_artifacts.py", "document_office.py", "document_pdf.py", "document_layout.py", "document_geometry.py", "document_scan_layout.py", "document_scan_recovery.py", "document_scientific.py", "document_worker.py"):
         shutil.copy2(project / "src" / "linguafloat" / name, target_source / name)
-    for name in ("document_frontmatter.py","document_graphics.py", "document_graphic_layout.py", "document_references.py"):
+    for name in ("document_failures.py", "document_context.py", "document_frontmatter.py","document_graphics.py", "document_graphic_layout.py", "document_references.py", "document_ocr.py"):
         shutil.copy2(project / "src" / "linguafloat" / name,target_source / name)
     shutil.copy2(project / "scripts" / "document_worker_entry.py", destination / "worker_entry.py")
     installed = sorted({f"{d.metadata['Name']}=={d.version}" for d in importlib.metadata.distributions()

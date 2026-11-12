@@ -7,17 +7,22 @@ import time
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThreadPool, QTimer, Signal, Slot, Qt
+from PySide6.QtCore import QSignalBlocker, QObject, QThreadPool, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QAction, QActionGroup, QCursor
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
+from PySide6.QtWidgets import (QApplication, QMenu, QMessageBox, QSystemTrayIcon,
+                              QDialog, QVBoxLayout, QLabel, QCheckBox, QDialogButtonBox, QFileDialog)
 
 from linguafloat import __version__
+from linguafloat.workbench import AppDialog as QDialog, MessageBox as QMessageBox
 from linguafloat.assets import app_icon
 from linguafloat.single_instance import SingleInstance, SingleInstanceError
 from linguafloat.document_ui import DocumentController
 from linguafloat.clipboard_io import read_clipboard_text
 from linguafloat.provider_tools import ProviderTask
 from linguafloat.import_ui import ImportPreview
+from linguafloat.cc_switch import CCSwitchError, import_category, read_candidates
+from linguafloat.config_transfer_ui import OpenCodeServiceDialog, CompleteConfigDialog
+from linguafloat.cc_sql import export_sql
 
 from linguafloat.capture import SelectionCapture
 from linguafloat.codex_config import (
@@ -87,7 +92,6 @@ class AppController(QObject):
         self._self_test_checks: list[str] = []
         self._self_test_source = ""
         self._self_test_started = 0.0
-        self._diagnostic_ocr = LocalOcr()
         self.thread_pool = QThreadPool.globalInstance()
         self.paused = False
         self.game_active = False
@@ -110,6 +114,7 @@ class AppController(QObject):
         self.tray = self._create_tray()
         self._refresh_key(profile)
         self.screen_reader = ScreenReader(self.window, lambda: self.settings.active_profile().cache_scope, self)
+        self._diagnostic_ocr = self.screen_reader.engine
         self.screen_reader.set_intervals(self.settings.ocr_interval, self.settings.translation_interval)
         self.screen_reader.translation_requested.connect(self._translate_screen)
         self.screen_reader.status_changed.connect(self.window.set_screen_status)
@@ -118,8 +123,12 @@ class AppController(QObject):
         self.window.screen_stop_requested.connect(self.screen_reader.stop)
         self.window.screen_move_requested.connect(self.screen_reader.move_region)
         self.window.screen_intervals_changed.connect(self._save_screen_intervals)
+        self.screen_reader.intervals_changed.connect(self._save_screen_intervals)
         self.window.input_language_requested.connect(self._save_input_language)
         self.window.input_hotkey_requested.connect(self._save_input_hotkey)
+        self._hotkey_recording = False
+        for editor in (self.window.hotkey_edit, self.window.input_hotkey_edit):
+            editor.recording_changed.connect(self._recording_hotkey)
         self.window.self_test_requested.connect(self._run_self_test)
         self.window.game_mode_requested.connect(self._save_game_mode)
         self.window.game_paths_requested.connect(self._save_game_paths)
@@ -148,6 +157,14 @@ class AppController(QObject):
         self.window.add_provider_requested.connect(self._add_provider)
         self.window.delete_provider_requested.connect(self._delete_provider)
         self.window.import_codex_requested.connect(self._import_codex)
+        self.window.import_sql_requested.connect(lambda: self._import_batch("sql", choose_file=True))
+        self.window.dashboard.complete_requested.connect(self._complete_import)
+        self.window.dashboard.credentials_requested.connect(self._refresh_dashboard_credentials)
+        self._transfer_report = []
+        self._transfer_pending = {}
+        self.window.export_cc_sql_requested.connect(self._export_cc_sql)
+        self.window.configure_opencode_requested.connect(self._configure_opencode)
+        self.window.configure_provider_requested.connect(self._configure_provider)
         self.window.export_codex_requested.connect(self._export_codex)
         self.window.connection_test_requested.connect(self._test_connection)
 
@@ -156,6 +173,7 @@ class AppController(QObject):
         self.game_monitor.changed.connect(self._game_changed)
         self._reconcile_triggers()
         self.help = HelpController(self)
+        self.first_run_dialog = None
         self.window.help_requested.connect(self.help.show)
 
     def _save_document_preferences(self,values):
@@ -180,11 +198,63 @@ class AppController(QObject):
         QTimer.singleShot(0, lambda: self.window.function_scroll.verticalScrollBar().setValue(0))
         self.help.start()
 
+    def _show_first_run(self):
+        from linguafloat.config_transfer_ui import FirstRunSetupDialog
+
+        if self.settings.first_run_complete:
+            return
+        if self.first_run_dialog is None:
+            dialog = FirstRunSetupDialog(self.settings, parent=self.window)
+            self.first_run_dialog = dialog
+            dialog.save_requested.connect(lambda: self._finish_first_run(dialog))
+            dialog.skip_requested.connect(lambda: self._finish_first_run(dialog, skip=True))
+        self.first_run_dialog.show()
+        self.first_run_dialog.raise_()
+        self.first_run_dialog.activateWindow()
+
+    def _finish_first_run(self, dialog, *, skip=False):
+        from linguafloat.cc_switch import ImportChoice, commit_import
+
+        proposed = copy.deepcopy(self.settings)
+        proposed.first_run_complete = True
+        candidate = None
+        try:
+            if skip:
+                self.config_store.save(proposed)
+            else:
+                candidate = dialog.candidate()
+                proposed.active_provider = candidate.profile.id
+                commit_import([ImportChoice(candidate, "add")], proposed,
+                              self.config_store, self.credentials)
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, CCSwitchError) else "请检查配置目录和凭据存储权限。"
+            dialog.save_failed("保存未完成，填写内容已保留。" + reason)
+            return
+        finally:
+            if candidate is not None:
+                candidate.secret = ""
+        # Keep the shared settings object used by running task controllers.
+        self.settings.first_run_complete = True
+        self.settings.providers = proposed.providers
+        self.settings.active_provider = proposed.active_provider
+        dialog.clear_sensitive()
+        dialog.accept()
+        self.first_run_dialog = None
+        dialog.deleteLater()
+        if not skip:
+            self.window.set_profiles(self.settings.providers, self.settings.active_provider)
+            self._edit_provider(self.settings.active_provider)
+            self._active_configuration_changed()
+        self.window.set_activity("已跳过配置，可稍后在“配置设置”添加供应商。" if skip else
+                                 "翻译服务已保存并启用，尚未测试连接。")
+        self.window.bring_to_front()
+        self.help.start()
+
     def _ordinary_allowed(self) -> bool:
         return not (self.paused or self.game_active or self._trigger_error)
 
     def _capture_allowed(self) -> bool:
-        return (not getattr(self, "_update_waiting", False) and self._ordinary_allowed()
+        return (not getattr(self, "_hotkey_recording", False) and not getattr(self, "_update_waiting", False) and self._ordinary_allowed()
                 and self.game_monitor.allows_capture())
 
     def _emit_hotkey(self, generation: int, *, input_translation: bool = False) -> None:
@@ -275,6 +345,10 @@ class AppController(QObject):
             self.window.set_activity(str(exc), error=True)
             return
         self.window.set_key_source(source, api_key)
+        self._refresh_dashboard_credentials()
+
+    def _refresh_dashboard_credentials(self):
+        self.window.dashboard.set_credentials({p.id:self._credential_source(p) for p in self.settings.providers})
 
     @Slot(str, str, str, str, str, str, str)
     def _test_connection(
@@ -510,7 +584,7 @@ class AppController(QObject):
         task.signals.succeeded.connect(self._self_test_ocr_succeeded)
         task.signals.failed.connect(self._self_test_ocr_failed)
         try:
-            self.thread_pool.start(task)
+            self.screen_reader.pool.start(task)
         except Exception:
             self._self_test_ocr_failed(0, "无法启动 OCR 测试")
 
@@ -543,6 +617,22 @@ class AppController(QObject):
             self.window.input_language_combo.blockSignals(False)
             self.window.set_activity("无法保存输入翻译语言。", error=True)
 
+    @Slot(bool)
+    def _recording_hotkey(self, recording):
+        self._hotkey_recording = recording
+        self.hotkey.stop()
+        self.input_hotkey.stop()
+        if not recording and not self.paused and not self.game_active:
+            generation = self._ordinary_generation
+            try:
+                self.input_hotkey.start(self.settings.input_hotkey, lambda: self._emit_hotkey(generation, input_translation=True))
+                if self.settings.trigger_mode in {"both", "hotkey"}:
+                    self.hotkey.start(self.settings.hotkey, lambda: self._emit_hotkey(generation))
+            except HotkeyError as exc:
+                self._trigger_error = str(exc)
+                self.window.set_activity(str(exc), error=True)
+                self._refresh_game_ui()
+
     @Slot(str)
     def _save_input_hotkey(self, value: str) -> None:
         previous = self.settings.input_hotkey
@@ -550,14 +640,15 @@ class AppController(QObject):
             spec = parse_hotkey(value)
             if spec.display == parse_hotkey(self.settings.hotkey).display:
                 raise HotkeyError("输入翻译和取词翻译不能使用相同快捷键。")
-            if self._ordinary_allowed():
+            if not self.paused and not self.game_active:
                 generation = self._ordinary_generation
                 self.input_hotkey.start(spec.display, lambda: self._emit_hotkey(generation, input_translation=True))
             self.settings.input_hotkey = spec.display
             self.config_store.save(self.settings)
         except (HotkeyError, OSError) as exc:
             self.settings.input_hotkey = previous
-            if self._ordinary_allowed():
+            self.window.input_hotkey_edit.setText(previous)
+            if not self.paused and not self.game_active:
                 try:
                     generation = self._ordinary_generation
                     self.input_hotkey.start(previous, lambda: self._emit_hotkey(generation, input_translation=True))
@@ -566,7 +657,8 @@ class AppController(QObject):
             self.window.set_activity(str(exc), error=True)
             return
         self.window.input_hotkey_edit.setText(spec.display)
-        self.window.set_activity("输入翻译快捷键已保存。")
+        self._reconcile_triggers()
+        self.window.set_activity("快捷键已保存，但监听未恢复：" + self._trigger_error if self._trigger_error else "输入翻译快捷键已保存。", error=bool(self._trigger_error))
 
     @Slot(int)
     def _on_input_hotkey(self, generation: int | None = None) -> None:
@@ -632,6 +724,9 @@ class AppController(QObject):
 
     @Slot(float, float)
     def _save_screen_intervals(self, ocr_interval: float, translation_interval: float) -> None:
+        if not (.5 <= ocr_interval <= 5 and 2 <= translation_interval <= 30):
+            self.screen_reader.set_intervals(self.settings.ocr_interval,self.settings.translation_interval)
+            return
         previous = (self.settings.ocr_interval, self.settings.translation_interval)
         self.settings.ocr_interval = ocr_interval
         self.settings.translation_interval = translation_interval
@@ -639,9 +734,13 @@ class AppController(QObject):
             self.config_store.save(self.settings)
         except OSError:
             self.settings.ocr_interval, self.settings.translation_interval = previous
+            self.screen_reader.set_intervals(*previous)
             self.window.set_activity("无法保存区域刷新间隔。", error=True)
             return
         self.screen_reader.set_intervals(ocr_interval, translation_interval)
+        with QSignalBlocker(self.window.ocr_interval_spin), QSignalBlocker(self.window.translation_interval_spin):
+            self.window.ocr_interval_spin.setValue(ocr_interval)
+            self.window.translation_interval_spin.setValue(translation_interval)
 
     def _deliver_translation(self, target: str, token: int, source: str, result: str, *, error: bool = False) -> None:
         if target in {"selection", "input", "overlay_input"}:
@@ -776,7 +875,7 @@ class AppController(QObject):
             if self._recipient_current(target, token):
                 self._submit_translation(source, target, token, language)
             elif target == "screen":
-                self.screen_reader.state.finish(token)
+                self.screen_reader.cancel_request(token)
 
     @Slot(str, str, str)
     def _translation_succeeded(
@@ -845,6 +944,7 @@ class AppController(QObject):
                 # environment variable previously supplied this provider's key.
                 env_key="" if api_key else env_key,
                 favorite=self.window.favorite_check.isChecked(),
+                source_app=getattr(self._find_provider(provider_id), "source_app", "manual"),
                 models=list(self.window._model_choices),
                 favorite_models=list(self.window._favorite_models),
                 timeout=self.window.timeout_spin.value(),
@@ -1002,21 +1102,33 @@ class AppController(QObject):
 
     @Slot()
     def _save_function_settings(self) -> None:
-        previous = copy.deepcopy(self.settings)
+        previous = (self.settings.hotkey, self.settings.input_hotkey,
+                    self.settings.trigger_mode, self.settings.font_size)
         try:
             spec = parse_hotkey(self.window.hotkey_edit.text())
-            if spec.display == parse_hotkey(self.settings.input_hotkey).display:
+            input_spec = parse_hotkey(self.window.input_hotkey_edit.text())
+            if spec.display == input_spec.display:
                 raise HotkeyError("输入翻译和取词翻译不能使用相同快捷键。")
             self.settings.hotkey = spec.display
+            self.settings.input_hotkey = input_spec.display
             self.settings.trigger_mode = self.window.trigger_mode_combo.currentData()
+            if not self.paused and not self.game_active:
+                self._configure_triggers(spec.display, self.settings.trigger_mode)
             self.settings.font_size = 14
             self.config_store.save(self.settings)
-        except (HotkeyError, OSError) as exc:
-            self.settings = previous
+        except (HotkeyError, OSError, RuntimeError) as exc:
+            (self.settings.hotkey, self.settings.input_hotkey,
+             self.settings.trigger_mode, self.settings.font_size) = previous
+            self.window.hotkey_edit.setText(self.settings.hotkey)
+            self.window.input_hotkey_edit.setText(self.settings.input_hotkey)
+            self.window.trigger_mode_combo.setCurrentIndex(self.window.trigger_mode_combo.findData(self.settings.trigger_mode))
+            self._reconcile_triggers()
             self.window.set_activity(str(exc), error=True)
             return
         apply_ui_font(self.application, self.settings.font_size)
-        self._reconcile_triggers()
+        self.window.hotkey_edit.setText(spec.display)
+        self.window.input_hotkey_edit.setText(input_spec.display)
+        self._refresh_game_ui()
         self.window.set_activity("功能设置已保存。")
 
     @Slot(str)
@@ -1038,8 +1150,12 @@ class AppController(QObject):
         except ValueError as exc:
             window.set_connection_status(str(exc), error=True)
             return
-        if operation == "detect" and QMessageBox.question(window, "检测接口", "将分别测试 Responses 和 Chat Completions，共发送两次请求。继续？") != QMessageBox.StandardButton.Yes:
-            return
+        if operation == "detect":
+            prompt = ("将使用当前原生协议发送一次短文本请求，可能产生费用。继续？"
+                      if profile.api_mode in {"anthropic", "gemini"} else
+                      "将分别测试 Responses 和 Chat Completions，共发送两次请求，可能产生费用。继续？")
+            if QMessageBox.question(window, "检测接口", prompt) != QMessageBox.StandardButton.Yes:
+                return
         self._provider_tool_token += 1
         self._provider_tool_form = (profile.id, window._form_values(), operation)
         window.fetch_models_button.setEnabled(False)
@@ -1073,7 +1189,8 @@ class AppController(QObject):
             modes = [item[0] for item in result]
             current = window.api_mode_combo.currentData()
             proposed = current if current in modes else modes[0]
-            label = "Responses" if proposed == "responses" else "Chat Completions"
+            label = {"responses": "Responses", "chat_completions": "Chat Completions",
+                     "anthropic": "Anthropic Messages", "gemini": "Gemini generateContent"}.get(proposed, proposed)
             if QMessageBox.question(window, "接口检测完成", f"可用接口：{', '.join(modes)}。\n是否在表单中选择 {label}？") == QMessageBox.StandardButton.Yes:
                 window.api_mode_combo.setCurrentIndex(window.api_mode_combo.findData(proposed))
 
@@ -1124,6 +1241,7 @@ class AppController(QObject):
         self.window.set_profiles(self.settings.providers, self.settings.active_provider, profile.id)
         self.window.set_key_source("missing")
         self.window.set_activity("已新增供应商，请填写连接信息后保存。")
+        self.window.open_provider_editor(profile.id)
 
     @Slot(str)
     def _delete_provider(self, provider_id: str) -> None:
@@ -1173,6 +1291,119 @@ class AppController(QObject):
         self._refresh_key(profile)
         self.window.set_activity("已清除当前供应商的 API key。")
 
+    def _import_batch(self, source="sql", choose_file=True):
+        if source != "sql":
+            raise ValueError("仅支持从数据管理导入 CC Switch SQL 文件。")
+        if not self.window.confirm_discard():
+            return
+        self.window.dashboard.show_data()
+        selected, _ = QFileDialog.getOpenFileName(self.window, "选择 CC Switch SQL 文件", "", "CC Switch SQL (*.sql)")
+        if not selected:
+            return
+        if Path(selected).suffix.lower() != ".sql":
+            self.window.dashboard.show_error("请选择 CC Switch 官方导出的 .sql 文件。")
+            return
+        paths = [Path(selected)]
+        entries, errors = [], []
+        for path in paths:
+            try:
+                entries.extend(read_candidates(path))
+            except CCSwitchError as exc:
+                errors.append((path.name, "读取失败", str(exc) + "；未修改来源，请检查文件后重试。"))
+            except OSError:
+                errors.append((path.name, "读取失败", "文件暂时无法读取；请检查权限、文件位置及占用情况后重试。"))
+        report = import_category(entries, self.settings, self.config_store, self.credentials)
+        self._transfer_pending = {i:entries[i] for i,r in enumerate(report) if r[1] in {"需要补全", "失败"}}
+        self._transfer_report = report + errors
+        self.window.set_profiles(self.settings.providers, self.settings.active_provider)
+        self._edit_provider(self.window._editing_id)
+        self._show_transfer_report(self._transfer_report)
+
+    def _complete_import(self, index):
+        item = self._transfer_pending.get(index)
+        if item is None:
+            return
+        dialog = CompleteConfigDialog(item, self.window)
+        if not dialog.exec():
+            return
+        report = import_category([dialog.item], self.settings, self.config_store, self.credentials)
+        self._transfer_report[index] = report[0]
+        if report[0][1] in {"成功", "重复跳过"}:
+            del self._transfer_pending[index]
+        else:
+            self._transfer_pending[index] = dialog.item
+        self.window.set_profiles(self.settings.providers, self.settings.active_provider)
+        self._edit_provider(self.window._editing_id)
+        self._show_transfer_report(self._transfer_report)
+
+    def _show_transfer_report(self, report):
+        from collections import Counter
+        counts = Counter(state for _, state, _ in report)
+        summary = "；".join(f"{state} {count} 条" for state, count in counts.items()) + "。未切换当前配置；未测试连接。"
+        self.window.set_activity(summary)
+        self.window.dashboard.set_report(report, self._transfer_pending.items() if report is self._transfer_report else ())
+
+    def _configure_opencode(self):
+        self._configure_provider("go")
+
+    def _configure_provider(self, kind):
+        from linguafloat.config_transfer_ui import ProviderPresetDialog
+        if not self.window.confirm_discard():
+            return
+        dialog = ProviderPresetDialog(kind, self.settings.providers, self.window)
+        try:
+            while dialog.exec():
+                candidate = dialog.candidate()
+                try:
+                    report = import_category([candidate], self.settings, self.config_store, self.credentials)
+                except Exception:
+                    dialog.save_failed("保存配置失败，请检查配置目录和凭据存储权限后重试。填写内容已保留。")
+                    continue
+                finally:
+                    candidate.secret = ""
+                if not report or any(state not in {"成功", "重复跳过"} for _, state, _ in report):
+                    details = "；".join(reason for _, _, reason in report)
+                    dialog.save_failed("保存未完成，填写内容已保留，可修改后重试。" + details)
+                    continue
+                self.window.set_profiles(self.settings.providers, self.settings.active_provider)
+                self._edit_provider(self.window._editing_id)
+                self._show_transfer_report(report)
+                break
+        finally:
+            dialog.clear_sensitive()
+            dialog.deleteLater()
+
+    def _export_cc_sql(self):
+        dialog = QDialog(self.window)
+        dialog.resize(640, 400)
+        dialog.setWindowTitle("导出 CC Switch SQL")
+        layout = QVBoxLayout(dialog)
+        info = QLabel("导出全部兼容配置。CC Switch 的 SQL 导入会替换整库，不会合并；必须先在 CC Switch 备份。\n"
+                      "本文件只含连接配置和必要结构，不含原 CC Switch 的历史、MCP、脚本或其他数据。\n"
+                        "默认不含密钥，导入目标端后需补全；不会修改本机 CC Switch。\n"
+                        "格式按 CC Switch 4.0.4 核对，官方程序隔离恢复尚未实测，请先在独立环境验证。")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        include = QCheckBox("包含 API Key（导出文件含明文密钥，请妥善保管）")
+        layout.addWidget(include)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("继续导出")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if not dialog.exec():
+            return
+        selected, _ = QFileDialog.getSaveFileName(self.window, "保存 CC Switch 恢复文件", "LinguaFloat-CC-Switch.sql", "SQL (*.sql)")
+        if not selected:
+            return
+        try:
+            report = export_sql(Path(selected), self.settings.providers, self.credentials, include.isChecked())
+        except (CCSwitchError, OSError):
+            self.window.set_activity("SQL 导出失败：没有兼容条目或文件无法写入；原配置未改变。", error=True)
+            return
+        self._show_transfer_report(report)
+
     @Slot(str)
     def _import_codex(self, selected_path: str) -> None:
         previous = copy.deepcopy(self.settings)
@@ -1188,6 +1419,7 @@ class AppController(QObject):
                 if operation == "skip":
                     continue
                 profile = copy.deepcopy(incoming)
+                profile.source_app = "codex"
                 if profile.id in profiles_by_id:
                     if operation == "add":
                         profile.id = create_provider_id("import")
@@ -1268,7 +1500,12 @@ class AppController(QObject):
 
     @Slot()
     def quit(self, *, for_update=False) -> None:
-        if not for_update and not self.window.confirm_discard():
+        if not getattr(self, "_quit_pending", False) and not for_update and not self.window.confirm_discard():
+            return
+        self._quit_pending = True
+        if not self.screen_reader.shutdown():
+            self.window.set_activity("正在结束本地文字识别，完成后退出…")
+            QTimer.singleShot(50, lambda: self.quit(for_update=for_update))
             return
         self.documents.shutdown()
         self.game_monitor.stop()

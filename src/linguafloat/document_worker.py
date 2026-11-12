@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -9,10 +10,29 @@ import shutil
 import sys
 import tempfile
 import threading
+from collections import Counter
 from pathlib import Path
 
 from linguafloat.document_core import Cancelled, DocumentError, DocumentJob, DocumentTranslator, JobControl, JobStore
 from linguafloat.document_metrics import PerformanceLog, active_clock
+
+
+def failure_trace(exc):
+    """Persist complete code-location stacks without text, paths or local values."""
+    exceptions, seen = [], set()
+    while exc is not None and id(exc) not in seen and len(exceptions) < 8:
+        seen.add(id(exc))
+        frames = []
+        tb = exc.__traceback__
+        while tb:
+            code = tb.tb_frame.f_code
+            frames.append(dict(file=Path(code.co_filename).name, line=tb.tb_lineno,
+                               function=code.co_name, module=tb.tb_frame.f_globals.get("__name__", "")))
+            tb = tb.tb_next
+        exceptions.append(dict(type=type(exc).__name__, frames=frames))
+        exc = exc.__cause__ if exc.__cause__ is not None else (
+            None if exc.__suppress_context__ else exc.__context__)
+    return dict(exceptions=exceptions, cause_chain_truncated=exc is not None)
 
 
 def failure_location(exc):
@@ -27,6 +47,13 @@ def failure_location(exc):
             frames.append(f"{Path(code.co_filename).name}:{tb.tb_lineno} ({code.co_name})")
         last, tb = tb, tb.tb_next
     lines = ["代码位置：" + " → ".join(frames[-4:])] if frames else []
+    if isinstance(exc, RecursionError):
+        trace = failure_trace(exc)["exceptions"][0]["frames"]
+        counts = Counter((f["file"], f["line"], f["function"]) for f in trace)
+        repeated = [f"{name}:{number} ({function}) ×{count}"
+                    for (name, number, function), count in counts.most_common(4) if count > 1]
+        if repeated:
+            lines.append("递归重复位置：" + "；".join(repeated))
     if isinstance(exc, AttributeError) and last:
         name = getattr(exc, "name", None)
         if isinstance(name, str) and name.isidentifier() and name in last.tb_frame.f_code.co_names:
@@ -58,6 +85,10 @@ def describe_failure(exc, job, stage):
         detail = ("[文档数据处理错误] 程序读取了不存在的字段（AttributeError）。\n"
                   "这是程序内部的数据兼容问题；不能据此认定 API Key 无效或模型超时。\n"
                   "处理建议：保留以下发生阶段及代码位置供修复；重复提交同一任务通常不能解决此错误。")
+    elif isinstance(exc, RecursionError):
+        detail = ("[文档对象递归异常] 对象处理超过递归深度（RecursionError）。\n"
+                  "这是程序内部的对象处理问题，不能据此认定密钥、额度或模型故障。\n"
+                  "完整脱敏代码调用栈已随失败任务保存在本地历史中；未自动切换排版模式。")
     else:
         detail = f"[文档处理异常] {type(exc).__name__}\n目前未能确定具体原因；不代表一定是 API 或密钥故障。\n处理建议：先用少量页面试译并保留此详情；检查文档能否正常打开、运行环境是否完整。"
     location = failure_location(exc)
@@ -92,12 +123,13 @@ def execute(job, key, store, control, emit, translator=None):
             extension = Path(job.source).suffix.lower()
             if job.skip_references and extension not in {".docx", ".pptx"}:
                 from linguafloat.document_pdf import open_document
-                from linguafloat.document_references import pdf_boundary, require_boundary
+                from linguafloat.document_references import pdf_boundary
                 with open_document(job.source) as document:
-                    job.reference_boundary = require_boundary(pdf_boundary(document, control, emit), "PDF / 扫描件")
+                    job.reference_boundary = pdf_boundary(document, control, emit) or {}
                 store.record_usage(job, {"reference_boundary": job.reference_boundary})
                 emit({"type": "progress", "stage": "解析中", "value": None,
-                      "message": f"参考文献从原始第 {job.reference_boundary['page'] + 1} 页开始，后续保留原文"})
+                      "message": (f"已定位第 {job.reference_boundary['page'] + 1} 页起的参考文献范围；后续章节继续翻译"
+                                  if job.reference_boundary else "未确认参考文献区域；继续处理可识别内容")})
             if extension == ".docx":
                 from linguafloat.document_office import translate_docx
                 outputs, warnings = translate_docx(job, translator, work, emit)
@@ -108,13 +140,18 @@ def execute(job, key, store, control, emit, translator=None):
                 from linguafloat.document_pdf import translate_layout_pdf, translate_reading_pdf
                 processor = translate_layout_pdf if job.pdf_mode == "layout" else translate_reading_pdf
                 outputs, warnings = processor(job, translator, work, emit)
-            if job.skip_references:
+            if job.skip_references and job.reference_boundary:
                 boundary = job.reference_boundary
                 location = (f"原始第 {boundary['page'] + 1} 页" + ("右栏" if boundary.get("column")=="right" else "") if "page" in boundary
                             else boundary.get("section", "Word 正文") + "第 " + str(boundary.get("paragraph", "?")) + " 段")
-                warnings.append(f"已启用文末保留：从{location}“{boundary.get('title', '参考文献')}”起保留原文及后续内容；未对该部分发送翻译请求。")
+                warnings.append(f"已保护参考文献：从{location}“{boundary.get('title', '参考文献')}”起的已确认参考文献区域保留原文；后续独立章节继续翻译。")
+                if boundary.get("uncertain_end"):
+                    warnings.append(f"原始第 {boundary['uncertain_end']['page'] + 1} 页起未确认参考文献续页范围，"
+                                    "未自动保护后续正文；请核对参考文献与附录。")
                 (work / "reference-skip.json").write_text(json.dumps(dict(
                     enabled=True, boundary=boundary, requests_for_skipped_content=0), ensure_ascii=False, indent=2), encoding="utf-8")
+            elif job.skip_references:
+                warnings.append("未可靠确认参考文献范围；这不代表文档没有参考文献，请核对输出中的相关内容。")
             control.checkpoint()
             emit({"type": "progress", "stage": "保存中", "value": 95, "message": "校验并保存输出文件"})
             if len(outputs) != int(job.mono) + int(job.bilingual):
@@ -135,38 +172,57 @@ def execute(job, key, store, control, emit, translator=None):
                 shutil.copy2(path, publish / name)
             if (work / "reference-skip.json").is_file():
                 shutil.copy2(work / "reference-skip.json", publish / "reference-skip.json")
+            local_issues = list(getattr(translator, "local_issues", []))
             if (work / "layout-report.json").is_file():
-                shutil.copy2(work / "layout-report.json", publish / "layout-report.json")
                 layout = json.loads((work / "layout-report.json").read_text(encoding="utf-8"))
+                def metadata(value):
+                    if isinstance(value, dict):
+                        return {k: metadata(v) for k, v in value.items()
+                                if k not in {"source", "text", "translation", "unicode"}}
+                    if isinstance(value, list):
+                        return [metadata(v) for v in value]
+                    return value
+                layout = metadata(layout)
+                (publish / "layout-report.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
                 explanation = ["保留版式处理说明", "未自动切换阅读版；保留原文的区域不代表已完成翻译。", ""]
                 for number, regions in layout.get("untranslated_regions", {}).items():
                     for index, region in enumerate(regions, 1):
                         origin = "左上角" if region.get("coordinates") == "top-left" else "左下角"
                         box = ", ".join(f"{v:.1f}" for v in region["box"])
+                        local_issues.append(dict(region, page=int(number) + 1,
+                            id=region.get("id", f"P{int(number)+1}-U{index}")))
                         explanation.extend([f"原始第 {int(number) + 1} 页，区域 {index}",
                             f"坐标：{box} pt（以页面{origin}为原点）",
                             "处理结果：保留原文", "原因：" + region["reason"],
-                            "原文：" + (region.get("source") or "请查看原 PDF 对应位置"),
-                            "未排入的完整译文：" + (region.get("translation") or "本区域未发送翻译请求"), ""])
+                            "内容：请对照输出文件的未翻译标记及原文。", ""])
                 if len(explanation) == 3:
                     explanation.append("没有检测到需要保留原文的排版冲突；公式和图表仍建议对照原文核对。")
                 (publish / "排版说明.txt").write_text("\n".join(explanation), encoding="utf-8-sig")
+            for index, issue in enumerate(local_issues, 1):
+                issue.setdefault("id", f"U{index}")
+                issue.setdefault("stage", "识别/排版")
+                issue.setdefault("fallback", "保留原文")
+                issue.setdefault("retry_result", "未追加请求")
+            if local_issues:
+                try:
+                    (publish / "未翻译问题.jsonl").write_text("\n".join(json.dumps(dict(
+                        job_id=job.job_id, source_id=hashlib.sha256(str(job.source).encode()).hexdigest(),
+                        **issue), ensure_ascii=False) for issue in local_issues), encoding="utf-8")
+                    lines = [f"{r['id']} · " + (f"第 {r['page']} 页" if "page" in r else
+                        f"{r.get('location', '文档')} 第 {r.get('paragraph', '?')} 段") + " · " + r["reason"] for r in local_issues]
+                    (publish / "未翻译说明.txt").write_text("\n".join(lines), encoding="utf-8-sig")
+                except OSError:
+                    warnings.append("未翻译问题日志写入失败；位置及原因仍保留在任务历史中。")
             (publish / "performance.json").write_text(json.dumps(emit.summary(), ensure_ascii=False, indent=2), encoding="utf-8")
             control.checkpoint()
             publish.rename(target)
             paths = [str(target / name) for name in names]
-        unresolved = 0
-        issues = []
-        report_path = target / "layout-report.json"
-        if report_path.is_file():
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            unresolved = sum(len(items) for items in report.get("untranslated_regions", {}).values())
-            for number, regions in report.get("untranslated_regions", {}).items():
-                for index, region in enumerate(regions,1):
-                    issues.append(f"第 {int(number)+1} 页 · 区域 {region.get('id') or index} · 排版/校验："
-                        + region.get("reason", "未记录具体原因，请保留 layout-report.json 供定位。"))
+        unresolved = len(local_issues)
+        issues = [f"{r['id']} · " + (f"第 {r['page']} 页" if "page" in r else
+                  f"{r.get('location', '文档')} 第 {r.get('paragraph', '?')} 段") + " · " + r["reason"] for r in local_issues]
         result = {"outputs": paths, "warnings": warnings, "untranslated_regions": unresolved,
                   "issues": issues,
+                  "local_failures": local_issues,
                   "reference_boundary": job.reference_boundary,
                   "requests": translator.calls, "cache_hits": translator.hits,
                   "performance": emit.summary(), "usage": getattr(translator, "token_usage", {})}
@@ -245,7 +301,8 @@ def main():
             # Only locally authored messages are displayed, never raw upstream bodies.
             reason = describe_failure(exc, job, stage)
             if store and job:
-                store.status(job, "failed", {"message": reason, "performance": emit.summary()})
+                store.status(job, "failed", {"message": reason, "performance": emit.summary(),
+                                             "diagnostic": failure_trace(exc)})
             emit({"type": "error", "message": reason})
         finally:
             if store:

@@ -58,6 +58,18 @@ def test_snapshot_corruption_falls_back_without_overwriting_input(tmp_path):
     assert cache.load(config) is None
 
 
+def test_snapshot_restores_both_source_and_completed_graphic_context(tmp_path):
+    job, config, docs = fixture(tmp_path)
+    cache = LayoutSnapshot(tmp_path, job, [0])
+    cache.source_context = [dict(text="magnetic resonance (MR)", role="body", section="Methods")]
+    cache.graphic_context = [dict(page=0, source="magnetic resonance (MR)", translation="磁共振（MR）", role="body")]
+    assert cache.save(docs, config, {})
+    fresh = LayoutSnapshot(tmp_path, job, [0])
+    assert fresh.load(config) is not None
+    assert fresh.source_context == cache.source_context
+    assert fresh.graphic_context == cache.graphic_context
+
+
 def test_snapshot_decoder_preserves_legacy_boolean_and_untyped_numbers():
     from babeldoc.format.pdf.document_il.il_version_1 import PdfFont, PdfCurve
     from linguafloat.document_artifacts import _decoder

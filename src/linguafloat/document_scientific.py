@@ -52,13 +52,16 @@ def reference_entries(page, in_references=False):
     anchors = [w for w in words if re.fullmatch(r"\[\d{1,3}\]|\d{1,3}\.", w[4]) and w[7] == 0]
     columns = []
     for word in sorted(anchors, key=lambda w: (w[0], w[1])):
-        col = next((c for c in columns if abs(c[0][0] - word[0]) < 4), None)
+        # Publishers align either edge of the marker column. A second digit
+        # moves the left edge but must not start an overlapping new column.
+        col = next((c for c in columns if abs(c[0][0] - word[0]) < 4
+                    or abs(c[0][2] - word[2]) < 4), None)
         if col is None:
             columns.append([word])
         else:
             col.append(word)
     entries = []
-    for column in columns:
+    for column in sorted(columns, key=lambda c: min(w[0] for w in c)):
         column.sort(key=lambda w: w[1])
         numbers = [int(re.sub(r"\D", "", w[4])) for w in column]
         if len(column) < 2 or any(b != a + 1 for a, b in zip(numbers, numbers[1:])):
@@ -291,6 +294,13 @@ def merge_formula_runs(parts, size):
     from babeldoc.format.pdf.document_il import Box, PdfFormula, PdfParagraphComposition
     if not size:
         return parts
+    if any(p.pdf_formula for p in parts):
+        # Native parser lines can still contain the equation's base characters.
+        # Expose their original glyphs to the existing word/geometry guards so
+        # a separate exponent cannot wrap independently from its base.
+        parts = [child for part in parts for child in (
+            [PdfParagraphComposition(pdf_character=c) for c in composition_chars(part)]
+            if not part.pdf_formula and composition_chars(part) else [part])]
     text = "".join((p.pdf_character.char_unicode or "") if p.pdf_character else "\ufffc" for p in parts)
     blocked = set()
     offsets, offset = [], 0
@@ -364,15 +374,49 @@ def check_formula_tokens(translate_input, output):
     return not unknown and pattern.findall(output) == pattern.findall(translate_input.unicode)
 
 
+def _formula_fragment_problem(source, text, tokens):
+    if not isinstance(text, str):
+        return "片段译文不是文字"
+    if not text.strip():
+        return "片段返回空译文"
+    if any(token in text for token in tokens) or re.search(r"\{[vV]\d+\}", text):
+        return "片段夹带公式标记"
+    if re.findall(r"<[^>]+>", source) != re.findall(r"<[^>]+>", text):
+        return "片段格式标签丢失、增加或顺序变化"
+    from linguafloat.document_context import scientific_quantities
+    if scientific_quantities(source) != scientific_quantities(text):
+        return "片段小数、百分比或数量级发生变化"
+    return ""
+
+
+def _formula_reply(response, fragments):
+    try:
+        data = json.loads(response)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("补译响应不是有效 JSON") from exc
+    expected = {item["id"] for item in fragments}
+    if not isinstance(data, list) or len(data) != len(expected):
+        raise ValueError("片段数量不匹配")
+    values = {}
+    for item in data:
+        if (not isinstance(item, dict) or type(item.get("id")) is not int
+                or item["id"] not in expected or item["id"] in values):
+            raise ValueError("片段编号缺失、重复或不匹配")
+        values[item["id"]] = item.get("output")
+    return values
+
+
 def translate_formula_segments(translate_input, translator):
     """Reconstruct immutable formulas around translated, explicitly keyed prose."""
     from babeldoc.format.pdf.document_il.midend.il_translator import FormulaPlaceholder
     from linguafloat.document_core import DocumentError
     tokens = [p.placeholder for p in translate_input.placeholders if isinstance(p, FormulaPlaceholder)]
+    if not tokens:
+        return translate_input.unicode
     pattern = "(" + "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True)) + ")"
     pieces = re.split(pattern, translate_input.unicode)
     fragments = [dict(id=i, input=text) for i, text in enumerate(pieces)
-                 if i % 2 == 0 and re.search(r"[A-Za-z]{2,}|[\u3400-\u9fff]", text)]
+                 if i % 2 == 0 and re.search(r"[A-Za-z]{2,}|[\u3400-\u9fff]", re.sub(r"<[^>]+>", "", text))]
     if not fragments:
         return translate_input.unicode
     messages = translator.messages("")
@@ -383,33 +427,88 @@ def translate_formula_segments(translate_input, translator):
         " Preserve all style tags exactly; fragments may begin or end with incomplete sentences."
         " Do not translate or output context. Do not add explanations or Markdown fences.")
     messages[1]["content"] = json.dumps(dict(fragments=fragments, context=translate_input.unicode), ensure_ascii=False)
-    response = translator.request(messages, part="公式间文字补译")
-    try:
-        data = json.loads(response)
-        expected = {item["id"] for item in fragments}
-        if not isinstance(data, list) or len(data) != len(expected):
-            raise ValueError("fragment count")
-        values = {}
-        for item in data:
-            if not isinstance(item, dict) or type(item.get("id")) is not int or item["id"] in values:
-                raise ValueError("fragment identity")
-            text = item.get("output")
-            if not isinstance(text, str) or not text.strip() or re.search(r"\{[vV]\d+\}", text):
-                raise ValueError("fragment content")
-            values[item["id"]] = text
-        if set(values) != expected:
-            raise ValueError("fragment identity")
-        for i, text in values.items():
-            pieces[i] = text
-        result = "".join(pieces)
-        if not check_formula_tokens(translate_input, result):
-            raise ValueError("formula identity")
-        return result
-    except (ValueError, TypeError) as exc:
-        # Invalidate only the failed structured response, not other translations.
-        if hasattr(translator.store, "discard"):
-            translator.store.discard(translator.cache_key(messages))
-        raise DocumentError("[公式旁文字补译失败] 返回的片段编号或数量不匹配，未改动原公式。已有其他译文缓存保留。") from exc
+    # Content recovery shares the transport retry budget: malformed responses
+    # must not create another independently replenished retry loop.
+    budget = [max(0, min(3, int(getattr(translator, "retries", 0))))]
+    store = getattr(translator, "store", None)
+    control = getattr(translator, "control", None)
+    recovered = False
+
+    def checkpoint():
+        if control is not None:
+            control.checkpoint()
+
+    def discard(request):
+        if store is not None:
+            store.discard(translator.cache_key(request))
+
+    def stop(reason):
+        location = getattr(translator, "location", "文档")
+        raise DocumentError(f"[公式旁文字补译失败] {location}：{reason}。未改动原公式，未发布不完整译文。"
+                            "已有合格译文缓存保留。")
+
+    def reserve(reason):
+        nonlocal recovered
+        checkpoint()
+        if getattr(getattr(translator, "job", None), "relayout_only", False):
+            stop(reason + "；仅重新排版不会发送补译请求")
+        if budget[0] <= 0:
+            stop(reason + "；当前重试额度已用尽")
+        budget[0] -= 1
+        recovered = True
+
+    while True:
+        response = translator.request(messages, budget=budget, part="公式间文字补译")
+        checkpoint()
+        try:
+            values = _formula_reply(response, fragments)
+            break
+        except ValueError as exc:
+            discard(messages)
+            reserve(str(exc))
+
+    problems = {item["id"]: _formula_fragment_problem(item["input"], values[item["id"]], tokens)
+                for item in fragments}
+    if any(problems.values()):
+        discard(messages)
+    for item in fragments:
+        identity, source = item["id"], item["input"]
+        problem = problems[identity]
+        if not problem:
+            continue
+        # Only the rejected prose is requested again; formula slots and the
+        # other validated fragments never leave their original positions.
+        single = translator.messages("")
+        single[0]["content"] += (
+            " Formula-segment single repair v1. The user JSON contains fragment and reference-only context."
+            " Translate only fragment as plain text, not JSON. Keep its grammatical role and every style tag."
+            " Context is not a translation target. Never copy any formula placeholders from context."
+            " Do not move, add or omit words to complete the surrounding sentence."
+            " Return nonempty translated text without explanations or Markdown fences.")
+        single[1]["content"] = json.dumps(dict(fragment=source, context=translate_input.unicode[:6000]), ensure_ascii=False)
+        while problem:
+            reserve(f"片段 {identity}：{problem}")
+            text = translator.request(single, budget=budget, part=f"公式间文字补译 · 片段 {identity}")
+            checkpoint()
+            problem = _formula_fragment_problem(source, text, tokens)
+            if not problem and text.lstrip().startswith(("```", '[{', '{"')):
+                problem = "单片段补译未返回纯文本"
+            if problem:
+                discard(single)
+            else:
+                values[identity] = text
+
+    for identity, text in values.items():
+        pieces[identity] = text
+    result = "".join(pieces)
+    if not check_formula_tokens(translate_input, result):
+        discard(messages)
+        stop("重组后的公式标记丢失、增加或顺序变化")
+    checkpoint()
+    if recovered and store is not None:
+        store.put(translator.cache_key(messages), json.dumps(
+            [dict(id=item["id"], output=values[item["id"]]) for item in fragments], ensure_ascii=False))
+    return result
 
 
 class ScientificLayout:

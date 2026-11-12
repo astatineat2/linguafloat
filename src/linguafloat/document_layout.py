@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import re
+import threading
 from collections import defaultdict
 
 from linguafloat.document_core import DocumentError
@@ -50,6 +51,19 @@ def font_scales(size):
         yield floor
 
 
+def _copy_passthrough_instruction(instruction, memo):
+    """Copy the declared string value, not the engine's persistent node history.
+
+    BabelDOC 0.6.2 defers graphic-state strings using LazyPassthroughInstruction.
+    Its linked snapshots can exceed Python's recursion depth during deepcopy.
+    Materialization already walks that history iteratively and preserves the
+    clipping flags and suffixes. An immutable string needs no further copying.
+    """
+    value = instruction.materialize()
+    memo[id(instruction)] = value
+    return value
+
+
 class LayoutPolicy:
     def __init__(self, control, source=None, pages=None, translator=None):
         self.control = control
@@ -75,6 +89,10 @@ class LayoutPolicy:
         self.before_layout = None
         self.scientific = None
         self.translation_failures = []
+        self.failed_paragraphs = set()
+        self.paragraph_pages = {}
+        self.active = threading.local()
+        self.request_keys = defaultdict(set)
         self.reference_boundary = {}
         if source and translator:
             from linguafloat.document_scientific import ScientificLayout
@@ -110,13 +128,14 @@ class LayoutPolicy:
                     self.source_subscripts[number] = candidates
 
     def obstacles(self, page, paragraph):
-        result = []
+        result = [tuple(r["box"]) for r in self.retained_regions.get(page.page_number, [])]
         height=page.cropbox.box.y2-page.cropbox.box.y
         for area in self.frontmatter.get(page.page_number,[])+self.graphic_regions.get(page.page_number,[]):
             x0,y0,x1,y1=area["box"]
             result.append((x0,height-y1,x1,height-y0))
-        if self.reference_boundary and page.page_number == self.reference_boundary["page"]:
-            result.extend((x0,height-y1,x1,height-y0) for x0,y0,x1,y1 in self.reference_boundary["boxes"])
+        if self.reference_boundary:
+            from linguafloat.document_references import reference_boxes
+            result.extend((x0,height-y1,x1,height-y0) for x0,y0,x1,y1 in reference_boxes(self.reference_boundary, page.page_number))
         for other in page.pdf_paragraph:
             if other is paragraph:
                 continue
@@ -137,6 +156,7 @@ class LayoutPolicy:
         if id(page) in self.prepared:
             return
         self.prepared.add(id(page))
+        page.pdf_paragraph[:] = [p for p in page.pdf_paragraph if id(p) not in self.failed_paragraphs]
         self.exclude_frontmatter(page)
         from babeldoc.format.pdf.document_il import Box
         from linguafloat.document_scientific import repair_cached_chemical_scripts
@@ -208,7 +228,7 @@ class LayoutPolicy:
                 if (len(word) > 3 and word.startswith(text) and word.isalpha()
                         and abs(source_box[0] - box[0]) < 3 and intersection(box, source_box) > 0):
                     page.pdf_paragraph.remove(paragraph)
-                    self.warnings.append(f"原始第 {page.page_number + 1} 页：清除标题单词 {word} 的孤立首字母残留 {text}。")
+                    self.warnings.append(f"原始第 {page.page_number + 1} 页：清除已核对的标题孤立首字母残留。")
                     break
 
     def formula_subscripts(self, docs):
@@ -357,18 +377,41 @@ class LayoutPolicy:
         glyphs = [box_of(c) for c in self.source_characters.get(page.page_number, [])
                   if c.xobj_id == paragraph.xobj_id and (c.char_unicode or "").strip() and owns(original, c)]
         restore_box = union([original, *glyphs])
-        text = paragraph.unicode or ""
         reason = "按原字号、1.3/1.2 倍行距、安全扩框及字号下限尝试后仍放不下，继续扩框可能遮挡相邻内容"
         self.retained_regions[page.page_number].append(dict(
-            box=bounds(restore_box), translation=text, reason=reason, status="untranslated", coordinates="bottom-left"))
+            box=bounds(restore_box), reason=reason, stage="排版", status="untranslated", coordinates="bottom-left"))
         self.warnings.append(f"原始第 {page.page_number + 1} 页，区域 {bounds(original)}：{reason}。"
-                             f"已保留该处原文，未新增页面；未排入的译文：{text[:100]}。完整译文见“排版说明.txt”。")
+                             "已保留该处原文，未新增页面；位置见问题日志。")
         # Restore the original region at assembly, including its original fonts.
         # Keep its box as an obstacle for subsequent translated paragraphs.
         paragraph.unicode = ""
         paragraph.box = restore_box
         paragraph.pdf_paragraph_composition = []
         paragraph.scale = 1
+
+    def retain_error(self, paragraph, error, stage):
+        from linguafloat.document_failures import diagnostic
+        record = diagnostic(error, stage)
+        if stage.startswith(("翻译", "段落")) and self.scientific:
+            translator = self.scientific.translator
+            for key in self.request_keys.get(id(paragraph), ()):
+                translator.store.discard(key)
+        if id(paragraph) in self.failed_paragraphs:
+            return
+        page = self.paragraph_pages.get(id(paragraph))
+        if page is None:
+            raise error
+        original = self.original_boxes.get(id(paragraph), paragraph.box)
+        box = bounds(original) or bounds(page.cropbox)
+        if not box:
+            raise error
+        self.failed_paragraphs.add(id(paragraph))
+        record.update(box=box, status="untranslated", coordinates="bottom-left")
+        self.retained_regions[page.page_number].append(record)
+        # The final PDF is restored from the source, not reconstructed glyphs.
+        paragraph.unicode = ""
+        paragraph.pdf_paragraph_composition = []
+        self.warnings.append(f"原始第 {page.page_number + 1} 页：{record['reason']}；已保留原文。")
 
     def defer_to_supplement(self, engine, paragraph, page, units):
         """Legacy explicit supplement renderer; strict layout never calls this."""
@@ -524,6 +567,7 @@ class LayoutPolicy:
                 self.continuation_indices[number].append(new_number)
 
     def __enter__(self):
+        from babeldoc.format.pdf.document_il.frontend.il_creater_active_support import LazyPassthroughInstruction
         from babeldoc.format.pdf.document_il.midend.typesetting import Typesetting, TypesettingUnit
         from babeldoc.format.pdf.document_il.backend.pdf_creater import PDFCreater
         from babeldoc.format.pdf.document_il.utils.fontmap import FontMapper
@@ -534,7 +578,10 @@ class LayoutPolicy:
                            add_font=FontMapper.add_font, units=Typesetting.create_typesetting_units,
                            translate=ILTranslator.translate, translate_llm=ILTranslatorLLMOnly.translate,
                            paragraph=ILTranslator.translate_paragraph, batch=ILTranslatorLLMOnly.translate_paragraph,
-                           post_translate=ILTranslator.post_translate_paragraph)
+                           pre_translate=ILTranslator.pre_translate_paragraph,
+                           typeset_paragraph=Typesetting.render_paragraph,
+                           post_translate=ILTranslator.post_translate_paragraph,
+                           passthrough_copy=LazyPassthroughInstruction.__dict__.get("__deepcopy__"))
         policy = self
         locations = {}
 
@@ -549,6 +596,8 @@ class LayoutPolicy:
             if policy.before_layout:
                 policy.before_layout(engine, docs)
             for page in docs.page:
+                for paragraph in page.pdf_paragraph:
+                    policy.paragraph_pages[id(paragraph)] = page
                 policy.prepare_page(page)
             return policy._saved["document"](engine, docs)
 
@@ -561,7 +610,7 @@ class LayoutPolicy:
             extended.page = [*docs.page, *(p for fragments in policy.continuations.values() for p in fragments)]
             return policy._saved["add_font"](mapper, pdf, extended)
 
-        def create_units(engine, paragraph, fonts):
+        def create_units_impl(engine, paragraph, fonts):
             from linguafloat.document_scientific import normalize_formula_baseline
             size = paragraph.pdf_style.font_size if paragraph.pdf_style else 0
             for part in paragraph.pdf_paragraph_composition:
@@ -592,17 +641,46 @@ class LayoutPolicy:
                                     "处理建议：检查文档字体组件是否完整；译文缓存保留，可仅重新排版。")
             return units
 
+        def create_units(engine, paragraph, fonts):
+            if id(paragraph) in policy.failed_paragraphs:
+                return []
+            try:
+                return create_units_impl(engine, paragraph, fonts)
+            except Exception as error:
+                policy.retain_error(paragraph, error, "字体/排版")
+                return []
+
         def translated(engine, docs, method):
             for page in docs.page:
                 policy.exclude_frontmatter(page)
                 from linguafloat.document_references import filter_layout_paragraphs
-                filter_layout_paragraphs(page, policy.reference_boundary)
+                for paragraph in page.pdf_paragraph:
+                    policy.paragraph_pages[id(paragraph)] = page
+                filter_layout_paragraphs(page, policy.reference_boundary, policy.retain_error)
                 for index, paragraph in enumerate(page.pdf_paragraph):
                     locations[id(paragraph)] = f"原始第 {page.page_number + 1} 页 · 段落 {index + 1}"
+            translator = policy.scientific.translator if policy.scientific else None
+            if translator and hasattr(translator, "set_source_context"):
+                from linguafloat.document_context import SourceBlock
+                blocks, section = [], ""
+                for page in docs.page:
+                    for paragraph in page.pdf_paragraph:
+                        role = paragraph.layout_label or "body"
+                        if role == "title":
+                            section = paragraph.unicode or ""
+                        blocks.append(SourceBlock(paragraph.unicode or "", role, section))
+                translator.set_source_context(blocks)
             if policy.scientific:
                 policy.scientific.prepare(docs)
+            for page in docs.page:
+                for index, paragraph in enumerate(page.pdf_paragraph):
+                    policy.paragraph_pages[id(paragraph)] = page
+                    policy.original_boxes[id(paragraph)] = copy.copy(paragraph.box)
+                    locations[id(paragraph)] = f"原始第 {page.page_number + 1} 页 · 段落 {index + 1}"
             references = policy.scientific.detach_references(docs) if policy.scientific else []
             preserved = policy.formula_subscripts(docs)
+            source_pairs = {id(p): (page.page_number, p.unicode or "", p.layout_label or "body")
+                            for page in docs.page for p in page.pdf_paragraph}
             try:
                 result = policy._saved[method](engine, docs)
             finally:
@@ -613,36 +691,85 @@ class LayoutPolicy:
                 paragraph.unicode, paragraph.pdf_style = original.unicode, original.pdf_style
                 paragraph.box = original.box
                 policy.warnings.append(f"原始第 {number + 1} 页：保留公式上下标 {original.unicode}，不按普通文字翻译或缩小。")
+            if translator and hasattr(translator, "graphic_context"):
+                for page in docs.page:
+                    for paragraph in page.pdf_paragraph:
+                        if id(paragraph) not in policy.failed_paragraphs and id(paragraph) in source_pairs:
+                            number, source, role = source_pairs[id(paragraph)]
+                            translator.graphic_context.remember(number, source, paragraph.unicode or "", role)
             return result
 
         def located(engine, paragraph, *args, batch=False, **kwargs):
             translator = policy.scientific.translator if policy.scientific else None
             previous = translator.location if translator else None
             paragraphs = paragraph.paragraphs if batch else [paragraph]
+            previous_active = getattr(policy.active, "paragraphs", [])
+            previous_batch = getattr(policy.active, "batch", False)
+            policy.active.paragraphs, policy.active.batch = paragraphs, batch
+            if not batch and id(paragraph) in policy.failed_paragraphs:
+                policy.active.paragraphs = previous_active
+                policy.active.batch = previous_batch
+                return
             if translator:
                 translator.location = "、".join(dict.fromkeys(locations.get(id(p), "段落 " + str(p.debug_id)) for p in paragraphs))
             try:
                 return policy._saved["batch" if batch else "paragraph"](engine, paragraph, *args, **kwargs)
             finally:
+                policy.active.paragraphs = previous_active
+                policy.active.batch = previous_batch
                 if translator:
                     translator.location = previous
 
-        def post_translate(engine, paragraph, tracker, translate_input, translated_text):
+        def post_translate_impl(engine, paragraph, tracker, translate_input, translated_text):
             from linguafloat.document_scientific import check_formula_tokens, translate_formula_segments
             if not check_formula_tokens(translate_input, translated_text):
                 if policy.scientific:
+                    translator = policy.scientific.translator
+                    previous = translator.location
+                    translator.location = locations.get(id(paragraph), "段落 " + str(paragraph.debug_id))
                     try:
-                        translated_text = translate_formula_segments(translate_input, policy.scientific.translator)
-                    except DocumentError as error:
-                        policy.translation_failures.append(error)
-                        raise
+                        translated_text = translate_formula_segments(translate_input, translator)
+                    finally:
+                        translator.location = previous
                 if not check_formula_tokens(translate_input, translated_text):
                     error = DocumentError(f"[公式占位符校验失败] 段落 {paragraph.debug_id}：补译后公式仍有丢失、重复或顺序变化。未发布损坏公式。")
-                    policy.translation_failures.append(error)
                     raise error
             return policy._saved["post_translate"](engine, paragraph, tracker, translate_input, translated_text)
 
+        def recover(paragraph, error, stage):
+            try:
+                policy.retain_error(paragraph, error, stage)
+            except Exception as fatal:
+                policy.translation_failures.append(fatal)
+                raise
+
+        def pre_translate(engine, paragraph, *args, **kwargs):
+            try:
+                return policy._saved["pre_translate"](engine, paragraph, *args, **kwargs)
+            except Exception as error:
+                recover(paragraph, error, "段落解析")
+                return None, None
+
+        def post_translate(engine, paragraph, *args, **kwargs):
+            try:
+                return post_translate_impl(engine, paragraph, *args, **kwargs)
+            except Exception as error:
+                recover(paragraph, error, "翻译/公式校验")
+
+        def typeset_paragraph(engine, paragraph, page, *args, **kwargs):
+            if id(paragraph) in policy.failed_paragraphs:
+                return
+            curves, forms = len(page.pdf_curve), len(page.pdf_form)
+            try:
+                return policy._saved["typeset_paragraph"](engine, paragraph, page, *args, **kwargs)
+            except Exception as error:
+                del page.pdf_curve[curves:]
+                del page.pdf_form[forms:]
+                recover(paragraph, error, "排版")
+
+        LazyPassthroughInstruction.__deepcopy__ = _copy_passthrough_instruction
         Typesetting.typesetting_document = document
+        Typesetting.render_paragraph = typeset_paragraph
         TypesettingUnit.relocate = relocate
         Typesetting._find_optimal_scale_and_layout = lambda engine, *args, **kwargs: policy.find(engine, *args, **kwargs)
         PDFCreater.write = write
@@ -651,11 +778,13 @@ class LayoutPolicy:
         ILTranslator.translate = lambda engine, docs: translated(engine, docs, "translate")
         ILTranslatorLLMOnly.translate = lambda engine, docs: translated(engine, docs, "translate_llm")
         ILTranslator.post_translate_paragraph = post_translate
+        ILTranslator.pre_translate_paragraph = pre_translate
         ILTranslator.translate_paragraph = lambda engine, paragraph, *a, **kw: located(engine, paragraph, *a, **kw)
         ILTranslatorLLMOnly.translate_paragraph = lambda engine, batch_paragraph, *a, **kw: located(engine, batch_paragraph, *a, batch=True, **kw)
         return self
 
     def __exit__(self, *_):
+        from babeldoc.format.pdf.document_il.frontend.il_creater_active_support import LazyPassthroughInstruction
         from babeldoc.format.pdf.document_il.midend.typesetting import Typesetting, TypesettingUnit
         from babeldoc.format.pdf.document_il.backend.pdf_creater import PDFCreater
         from babeldoc.format.pdf.document_il.utils.fontmap import FontMapper
@@ -664,11 +793,17 @@ class LayoutPolicy:
         Typesetting._find_optimal_scale_and_layout = self._saved["find"]
         TypesettingUnit.relocate = self._saved["relocate"]
         Typesetting.typesetting_document = self._saved["document"]
+        Typesetting.render_paragraph = self._saved["typeset_paragraph"]
         PDFCreater.write = self._saved["write"]
         FontMapper.add_font = self._saved["add_font"]
         Typesetting.create_typesetting_units = self._saved["units"]
         ILTranslator.translate = self._saved["translate"]
         ILTranslatorLLMOnly.translate = self._saved["translate_llm"]
         ILTranslator.post_translate_paragraph = self._saved["post_translate"]
+        ILTranslator.pre_translate_paragraph = self._saved["pre_translate"]
         ILTranslator.translate_paragraph = self._saved["paragraph"]
         ILTranslatorLLMOnly.translate_paragraph = self._saved["batch"]
+        if self._saved["passthrough_copy"] is None:
+            del LazyPassthroughInstruction.__deepcopy__
+        else:
+            LazyPassthroughInstruction.__deepcopy__ = self._saved["passthrough_copy"]

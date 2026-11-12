@@ -50,7 +50,8 @@ def request(client, method, path, **kwargs):
 
 
 def ensure_repositories(client):
-    for name, private in (("linguafloat", False), ("linguafloat-releases", False)):
+    # Development stays private until the owner explicitly requests otherwise.
+    for name, private in (("linguafloat", True), ("linguafloat-releases", False)):
         path = f"/repos/{OWNER}/{name}"
         existing = client.get("https://api.github.com" + path)
         if existing.status_code == 404:

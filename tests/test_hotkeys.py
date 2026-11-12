@@ -17,7 +17,7 @@ def test_parse_function_key():
     assert spec.pynput == "<shift>+<f8>"
 
 
-@pytest.mark.parametrize("value", ["T", "Ctrl+Alt", "Ctrl+Alt+T+Y", "Ctrl+Space"])
+@pytest.mark.parametrize("value", ["T", "Ctrl+Alt", "Ctrl+Alt+T+Y", "Ctrl+UnsupportedKey"])
 def test_reject_invalid_hotkeys(value):
     with pytest.raises(HotkeyError):
         parse_hotkey(value)

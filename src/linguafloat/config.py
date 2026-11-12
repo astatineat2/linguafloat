@@ -44,6 +44,8 @@ class ProviderProfile:
     reasoning_effort: str = ""
     thinking_mode: str = ""
     document_timeout: int = 180
+    native_auth: str = "api_key"
+    source_app: str = "manual"
 
     @property
     def cache_scope(self) -> str:
@@ -90,7 +92,7 @@ class AppSettings:
     active_provider: str = "openai"
     providers: list[ProviderProfile] = field(default_factory=lambda: [default_provider()])
     document_translate_graphics: bool = False
-    document_skip_references: bool = False
+    document_skip_references: bool = True
     document_source_language: str = "en"
     document_target_language: str = "zh-Hans"
     document_pdf_mode: str = "layout"
@@ -173,7 +175,7 @@ class ConfigStore:
             providers=providers,
             document_translate_graphics=(raw.get("document_translate_graphics") is True if "document_translate_graphics" in raw
                 else raw.get("document_translate_tables") is True or raw.get("document_translate_figures") is True),
-            document_skip_references=raw.get("document_skip_references") is True,
+            document_skip_references=True,
             document_source_language=option("document_source_language",LANGUAGES,"en"),
             document_target_language=option("document_target_language",LANGUAGES,"zh-Hans"),
             document_pdf_mode=option("document_pdf_mode",{"reading","layout"},"layout"),
@@ -224,6 +226,8 @@ class ConfigStore:
                     instruction_role=item.get("instruction_role") if item.get("instruction_role") in {"system", "developer", "user"} else "system",
                     reasoning_effort=item.get("reasoning_effort") if item.get("reasoning_effort") in {"none", "minimal", "low", "medium", "high", "xhigh"} else "",
                     thinking_mode=item.get("thinking_mode") if item.get("thinking_mode") in {"qwen_off", "qwen_on", "deepseek_off", "deepseek_on"} else "",
+                    native_auth=item.get("native_auth") if item.get("native_auth") in {"api_key", "bearer"} else "api_key",
+                    source_app=item.get("source_app") if item.get("source_app") in {"codex", "claude", "claude-desktop", "gemini", "opencode", "openclaw"} else "manual",
                     document_timeout=int(ConfigStore._interval(item.get("document_timeout"),
                         ConfigStore._interval(raw.get("document_timeout"),180,30,600),30,600)),
                 )
@@ -233,7 +237,7 @@ class ConfigStore:
                 profile.id
                 and profile.name
                 and profile.model
-                and profile.api_mode in {"responses", "chat_completions"}
+                and profile.api_mode in {"responses", "chat_completions", "anthropic", "gemini"}
             ):
                 providers.append(profile)
 
@@ -283,8 +287,10 @@ def validate_provider(profile: ProviderProfile) -> None:
         raise ValueError("供应商显示名称不能为空。")
     if not profile.model:
         raise ValueError("模型名称不能为空。")
-    if profile.api_mode not in {"responses", "chat_completions"}:
+    if profile.api_mode not in {"responses", "chat_completions", "anthropic", "gemini"}:
         raise ValueError("接口类型无效。")
+    if profile.native_auth not in {"api_key", "bearer"}:
+        raise ValueError("认证请求头类型无效。")
     if profile.env_key and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", profile.env_key):
         raise ValueError("环境变量名只能包含字母、数字和下划线，且不能以数字开头。")
 

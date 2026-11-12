@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPen, QPixmap, QRegion
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QSizeGrip, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal, QSignalBlocker
+from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPen, QPixmap, QRegion, QTextOption
+from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QSizeGrip, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget
 import qtawesome as qta
+import html
+from linguafloat.transparent_input import TransparentInputWindow
 
 from linguafloat.theme import FLOAT_STYLESHEET, set_state
 from linguafloat.resize import CURSORS, ResizeEdge, resized_rect, create_resize_edges, layout_resize_edges
@@ -74,14 +76,13 @@ class DragHandle(QLabel):
             self.finished.emit()
 
 
-class RegionSelector(QWidget):
+class RegionSelector(TransparentInputWindow):
     selected = Signal(object, object)
     cancelled = Signal()
 
-    def __init__(self, screen, snapshot: QPixmap, move_region: QRect | None = None) -> None:
+    def __init__(self, screen, snapshot: QPixmap | None = None, move_region: QRect | None = None) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.target_screen = screen
-        self.snapshot = snapshot
         self.origin: QPoint | None = None
         self.move_mode = move_region is not None
         self.selection = move_region.translated(-screen.geometry().topLeft()) if self.move_mode else QRect()
@@ -93,13 +94,8 @@ class RegionSelector(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.drawPixmap(self.rect(), self.snapshot)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 95))
+        self.clear_glass(painter, self.rect())
         if not self.selection.isEmpty():
-            painter.save()
-            painter.setClipRect(self.selection)
-            painter.drawPixmap(self.rect(), self.snapshot)
-            painter.restore()
             painter.setPen(QPen(QColor("#26c6a0"), 2))
             painter.drawRect(self.selection.adjusted(0, 0, -1, -1))
 
@@ -135,7 +131,7 @@ class RegionSelector(QWidget):
             return
         self._update_selection(event.position().toPoint())
         self.origin = None
-        if self.selection.width() >= 32 and self.selection.height() >= 24:
+        if self.selection.width() >= 48 and self.selection.height() >= 32:
             self.selected.emit(self.target_screen, self.selection.translated(self.geometry().topLeft()))
         else:
             self.selection = QRect()
@@ -148,8 +144,8 @@ class RegionSelector(QWidget):
             super().keyPressEvent(event)
 
 
-class RegionOutline(QWidget):
-    PADDING = 6
+class RegionOutline(TransparentInputWindow):
+    PADDING = 10
     moved = Signal(object)
     move_started = Signal()
     move_finished = Signal(object)
@@ -159,10 +155,11 @@ class RegionOutline(QWidget):
                          | Qt.WindowType.WindowStaysOnTopHint
                          | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("识别区域边框 - LinguaFloat")
         self.setMouseTracking(True)
+        self.setToolTip("框内按住左键移动；四边和四角拖动缩放。停止后可操作下方软件。")
         self._drag_origin: QPoint | None = None
+        self._drag_started = False
         self._drag_region = QRect()
         self._resize_corner = ""
         self._minimum_size = QSize(48, 32)
@@ -180,22 +177,22 @@ class RegionOutline(QWidget):
 
     def resizeEvent(self, event) -> None:
         p = self.PADDING
-        self.setMask(QRegion(self.rect()).subtracted(QRegion(self.rect().adjusted(p, p, -p, -p))))
+        self.setMask(QRegion(self.rect()))
         super().resizeEvent(event)
 
     def _corner_at(self, point: QPoint) -> str:
-        if self.move_handle_rect().contains(point):
-            return ""
-        margin = 14
+        # Corners first, then the narrow exterior border; all interior pixels move.
+        m = min(10, self.width() // 6, self.height() // 6)
         x, y = point.x(), point.y()
-        left, top = 0, 0
-        right, bottom = self.width() - 1, self.height() - 1
-        horizontal = "left" if x <= left + margin else "right" if x >= right - margin else ""
-        vertical = "top" if y <= top + margin else "bottom" if y >= bottom - margin else ""
-        return vertical + horizontal
+        h = "left" if x < m else "right" if x >= self.width()-m else ""
+        v = "top" if y < m else "bottom" if y >= self.height()-m else ""
+        if h and v:
+            return v+h
+        return h or v
 
     def move_handle_rect(self) -> QRect:
-        return QRect(self.width() // 2 - 18, 0, 36, self.PADDING)
+        # Kept for accessibility/test callers: the entire interior is the handle.
+        return self.rect().adjusted(self.PADDING, self.PADDING, -self.PADDING, -self.PADDING)
 
     @staticmethod
     def _cursor_for_corner(corner: str) -> Qt.CursorShape:
@@ -203,13 +200,14 @@ class RegionOutline(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        self.clear_glass(painter, self.rect())
         painter.setPen(QPen(QColor("#16845b"), 1))
         painter.drawRect(self.rect().adjusted(3, 3, -3, -3))
-        painter.fillRect(self.move_handle_rect(), QColor("#16845b"))
         for x in (0, self.width() - 6):
             for y in (0, self.height() - 6):
                 painter.fillRect(QRect(x, y, 6, 6), QColor("#16845b"))
-        for rect in (QRect(0, self.height() // 2 - 8, 3, 16),
+        for rect in (QRect(self.width() // 2 - 8, 0, 16, 3),
+                     QRect(0, self.height() // 2 - 8, 3, 16),
                      QRect(self.width() - 3, self.height() // 2 - 8, 3, 16),
                      QRect(self.width() // 2 - 8, self.height() - 3, 16, 3)):
             painter.fillRect(rect, QColor("#16845b"))
@@ -218,12 +216,12 @@ class RegionOutline(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         self._drag_origin = event.globalPosition().toPoint()
+        self._drag_started = False
         self._drag_region = self.source_region()
         screen = QGuiApplication.screenAt(self._drag_region.center()) or self.screen()
         self._drag_bounds = QRect(screen.geometry())
         self._resize_corner = self._corner_at(event.position().toPoint())
         self.setCursor(self._cursor_for_corner(self._resize_corner))
-        self.move_started.emit()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self._drag_origin is not None:
@@ -231,13 +229,25 @@ class RegionOutline(QWidget):
             self._drag_origin = None
             self._resize_corner = ""
             self.setCursor(Qt.CursorShape.SizeAllCursor)
-            self.move_finished.emit(region)
+            if self._drag_started:
+                self._drag_started = False
+                self.move_finished.emit(region)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._drag_origin is None:
             self.setCursor(self._cursor_for_corner(self._corner_at(event.position().toPoint())))
             return
+        if not self._drag_started:
+            if (event.globalPosition().toPoint() - self._drag_origin).manhattanLength() < QApplication.startDragDistance():
+                return
+            self._drag_started = True
+            self.move_started.emit()
         self._resize_or_move(event)
+
+    def hideEvent(self, event):
+        self._drag_origin = None
+        self._drag_started = False
+        super().hideEvent(event)
 
     def _resize_or_move(self, event: QMouseEvent) -> None:
         # Keep the actual geometry update in one path for corner resize and pan.
@@ -271,6 +281,7 @@ class ScreenTranslationPanel(QWidget):
     select_requested = Signal()
     stop_requested = Signal()
     move_region_requested = Signal()
+    intervals_changed = Signal(float, float)
 
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
@@ -284,6 +295,10 @@ class ScreenTranslationPanel(QWidget):
         self.drag_offset = QPoint()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(FLOAT_STYLESHEET)
+        self._blocks = []
+        self._copy_text = ""
+        self._rendering = False
+        self._rendered_html = None
         self._paused = False
         self._status_message = "等待文字"
         self._status_error = False
@@ -312,7 +327,19 @@ class ScreenTranslationPanel(QWidget):
         tools.addWidget(self.status, 1)
         for button in (self.move_button, self.select_button, self.copy_button):
             tools.addWidget(button)
+        self.timing_button = tool_button("mdi6.timer-outline", "刷新与翻译间隔", lambda: self.timing.setVisible(not self.timing.isVisible()))
+        tools.addWidget(self.timing_button)
         layout.addLayout(tools)
+        self.timing = QWidget()
+        form = QFormLayout(self.timing); form.setContentsMargins(0,0,0,0)
+        self.ocr_interval_spin = QDoubleSpinBox(); self.ocr_interval_spin.setRange(.5,5)
+        self.translation_interval_spin = QDoubleSpinBox(); self.translation_interval_spin.setRange(2,30)
+        for field, label in ((self.ocr_interval_spin,"识别间隔"),(self.translation_interval_spin,"翻译最短间隔")):
+            field.setDecimals(1); field.setSingleStep(.5); field.setSuffix(" 秒")
+            field.setAccessibleName(label)
+            field.valueChanged.connect(lambda _: self.intervals_changed.emit(self.ocr_interval_spin.value(),self.translation_interval_spin.value()))
+            form.addRow(label,field)
+        layout.addWidget(self.timing); self.timing.hide()
         self.translation = QTextBrowser()
         self.translation.setObjectName("translation")
         self.translation.setAccessibleName("区域翻译结果")
@@ -321,7 +348,10 @@ class ScreenTranslationPanel(QWidget):
         self.setMaximumSize(800, 650)
         self.resize(420, 300)
         self.translation.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        self.translation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.translation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        option = self.translation.document().defaultTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.translation.document().setDefaultTextOption(option)
         layout.addWidget(self.translation, 1)
         grip_row = QHBoxLayout()
         grip_row.addStretch()
@@ -339,6 +369,8 @@ class ScreenTranslationPanel(QWidget):
         if self.isVisible():
             self.user_moved = True
         super().resizeEvent(event)
+        # QTextDocument wraps the existing text on resize. Replacing its HTML
+        # here causes scrollbar/viewport resize notifications to feed back.
 
     def _begin_drag(self, point: QPoint) -> None:
         self.drag_offset = point - self.pos()
@@ -371,19 +403,55 @@ class ScreenTranslationPanel(QWidget):
         self.pause_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.pause_button.setFixedWidth(76)
 
+    def set_intervals(self, ocr, translation):
+        with QSignalBlocker(self.ocr_interval_spin), QSignalBlocker(self.translation_interval_spin):
+            self.ocr_interval_spin.setValue(ocr)
+            self.translation_interval_spin.setValue(translation)
+        self.timing_button.setToolTip(f"识别间隔 {ocr:g} 秒 · 翻译最短间隔 {translation:g} 秒（点击调整）")
+
+    def show_blocks(self, blocks):
+        self._blocks = list(blocks)
+        self._copy_text = "\n\n".join(result for source,result,status in blocks if status=="done")
+        self.translation.setToolTip("\n".join(source for source,_,_ in blocks))
+        self.copy_button.setEnabled(bool(self._copy_text))
+        self._render_blocks()
+
+    def _render_blocks(self):
+        if self._rendering:
+            return
+        self._rendering = True
+        try:
+            bar = self.translation.verticalScrollBar(); pos=bar.value()
+            paragraphs=[]
+            for index,(source,result,status) in enumerate(self._blocks):
+                if status=="done":
+                    paragraphs.append('<p style="margin:0 0 10px 0">'+html.escape(result).replace("\n", "<br>")+'</p>')
+                else:
+                    label = f"第 {index+1} 段 · " + (result if status=="error" else "翻译中…" if status=="pending" else "等待翻译")
+                    color = "#a83232" if status=="error" else "#738092"
+                    paragraphs.append(f'<p style="color:{color};font-size:12px">'+html.escape(label)+'</p>')
+            content = "".join(paragraphs)
+            if content == self._rendered_html:
+                return
+            self.translation.setHtml(content)
+            self._rendered_html = content
+            bar.setValue(pos)
+        finally:
+            self._rendering = False
+
     def show_translation(self, source: str, translated: str) -> None:
-        self.translation.setPlainText(translated)
-        self.translation.setToolTip(source)
-        self.copy_button.setEnabled(bool(translated))
+        self.show_blocks([(source, translated, "done")])
         self.set_status("翻译完成")
 
     def clear_translation(self) -> None:
+        self._blocks=[]; self._copy_text=""
+        self._rendered_html = None
         self.translation.clear()
         self.translation.setToolTip("")
         self.copy_button.setEnabled(False)
 
     def _copy(self) -> None:
-        QApplication.clipboard().setText(self.translation.toPlainText())
+        QApplication.clipboard().setText(self._copy_text)
 
     def closeEvent(self, event) -> None:
         self.stop_requested.emit()

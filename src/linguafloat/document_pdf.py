@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from linguafloat.document_core import DocumentError, selected_pages
 from linguafloat.document_metrics import active_clock
+from linguafloat.document_references import reference_after_end, reference_boxes, reference_page_only
 
 
 def open_document(path):
@@ -60,7 +61,8 @@ class DocumentOcr:
                      "Cls.model_path": models / "ch_ppocr_mobile_v2.0_cls_mobile.onnx"}
             if not all(path.is_file() for path in paths.values()):
                 raise DocumentError("文档 OCR 模型缺失，请使用完整便携版。")
-            self.engine = rapidocr.RapidOCR(params={
+            from linguafloat.document_ocr import DocumentRapidOCR
+            self.engine = DocumentRapidOCR(params={
                 **{key: str(path) for key, path in paths.items()},
                 "Global.log_level": "error", "Global.max_side_len": 2400,
                 "EngineConfig.onnxruntime.intra_op_num_threads": 2,
@@ -217,6 +219,12 @@ def check_layout_paragraph(paragraph, characters, page_number=None):
 
 def translate_reading_pdf(job, translator, output, emit):
     import pymupdf as fitz
+    from linguafloat.document_failures import diagnostic, mark_pdf
+    retained = {}
+
+    def retain(number, page, error, stage):
+        retained[number] = [dict(diagnostic(error, stage), box=list(page.rect),
+                                 status="untranslated", coordinates="top-left")]
     ocr = DocumentOcr()
     ocr.emit = emit
     warnings = ["阅读版重新排版，不复刻原文公式、图表及多栏布局；双语版保留原文页面。"]
@@ -228,13 +236,16 @@ def translate_reading_pdf(job, translator, output, emit):
     with open_document(job.source) as source, fitz.open() as mono, fitz.open() as dual:
         pages = selected_pages(job.pages, len(source), job.trial)
         boundary = job.reference_boundary if job.skip_references else {}
-        if boundary and boundary["column"] != "full":
-            raise DocumentError(f"第 {boundary['page'] + 1} 页参考文献从分栏开始，阅读版无法安全保持同页阅读顺序；请选择保留版式。未发送翻译请求。")
         texts = []
+        after_texts, after_results = {}, {}
         for i, number in enumerate(pages):
             translator.location = f"PDF 第 {number + 1} 页"
             translator.control.checkpoint()
-            if boundary and number > boundary["page"]:
+            if number in boundary.get("uncertain_pages", []):
+                retain(number, source[number], DocumentError("参考文献与正文范围无法安全分离，保留本页原文"), "参考文献边界")
+                texts.append("")
+                continue
+            if reference_page_only(boundary, number):
                 texts.append("")
                 continue
             page = source[number]
@@ -258,45 +269,73 @@ def translate_reading_pdf(job, translator, output, emit):
                       "seconds": active_clock(translator.control) - started})
             if not cached and used_ocr:
                 emit({"type": "progress", "stage": "OCR 中", "stage_key": f"ocr-{number}", "value": int(i * 10 / len(pages)), "message": f"本地 OCR：第 {number + 1} 页"})
-                text = ocr.recognize(page)
+                try:
+                    text = ocr.recognize(page)
+                except Exception as error:
+                    retain(number, page, error, "OCR")
+                    text = ""
             if used_ocr:
                 scanned += 1
-            if store and not cached:
+            if store and not cached and text.strip():
                 store.put(cache_key, json.dumps({"text": text, "ocr": used_ocr}, ensure_ascii=False))
             elif cached:
                 emit({"type": "measurement", "name": "页面解析/OCR 缓存命中", "seconds": 0})
+            protected = [fitz.Rect(b) for b in reference_boxes(boundary, number)]
+            if protected and number not in retained:
+                from linguafloat.document_references import _digital_lines
+                try:
+                    rows = ocr.recognize(page, positioned=True) if used_ocr else _digital_lines(page)
+                    crossing = [r for r in rows if any(fitz.Rect(r["box"]).intersects(b)
+                                and not (b + (-2, -2, 2, 2)).contains(fitz.Rect(r["box"])) for b in protected)]
+                    if crossing:
+                        raise DocumentError("参考文献边界穿过提取行，阅读版保留该页原文")
+                    if not rows:
+                        raise DocumentError("参考文献页面未取得可定位文字，阅读版保留该页原文")
+                except Exception as error:
+                    retain(number, page, error, "参考文献边界")
+                    text = ""
+                else:
+                    split = boundary.get("column_splits", {}).get(str(number))
+                    ordered = [r for r in sorted(rows, key=lambda r: (
+                               split is not None and r["box"][0] >= split, r["box"][1], r["box"][0]))
+                               if not any(fitz.Rect(r["box"]).intersects(b) for b in protected)]
+                    after = [r for r in ordered if reference_after_end(boundary, number, r["box"])]
+                    after_texts[i] = "\n".join(r["text"] for r in after)
+                    text = "\n".join(r["text"] for r in ordered if r not in after)
             translator.control.checkpoint()
             texts.append(text)
         results = [None] * len(texts)
-        if boundary:
-            number = boundary["page"]
-            if number in pages:
-                index = pages.index(number)
-                marker = boundary["title"]
-                matches = list(re.finditer(re.escape(marker), texts[index], re.I))
-                if len(matches) != 1:
-                    raise DocumentError(f"第 {number + 1} 页参考文献标题在阅读版文本中无法唯一定位，已停止翻译，避免误跳过正文。")
-                texts[index] = texts[index][:matches[0].start()].rstrip()
-        total_work = sum(len(t) for i, t in enumerate(texts) if t.strip() and (not boundary or pages[i] <= boundary["page"]))
+        if hasattr(translator, "set_source_context"):
+            from linguafloat.document_context import SourceBlock
+            translator.set_source_context(SourceBlock(t, "page") for i, text in enumerate(texts)
+                                          for t in (text, after_texts.get(i, "")) if t.strip())
+        total_work = sum(len(t) for t in texts) + sum(len(t) for t in after_texts.values())
         done = 0
         def progress():
             emit({"type": "progress", "stage": "翻译中", "stage_key": "reading-translate",
                   "work_done": done, "work_total": total_work, "value": 10 + int(done * 70 / max(1, total_work)),
                   "message": f"已翻译 {done}/{total_work} 字符"})
         progress()
-        def translate_page(index):
+        def translate_page(index, after=False):
             translator.control.checkpoint()
             translator.location = f"PDF 第 {pages[index] + 1} 页"
-            return translator.translate(texts[index])
+            return translator.translate(after_texts[index] if after else texts[index])
         with ThreadPoolExecutor(max_workers=getattr(getattr(translator, "gate", None), "maximum", 1)) as pool:
-            futures = {pool.submit(translate_page, i): i for i, text in enumerate(texts)
-                       if text.strip() and (not boundary or pages[i] <= boundary["page"])}
+            futures = {pool.submit(translate_page, i): (i, False) for i, text in enumerate(texts)
+                       if text.strip()}
+            futures.update({pool.submit(translate_page, i, True): (i, True) for i, text in after_texts.items() if text.strip()})
             try:
                 for future in as_completed(futures):
                     translator.control.checkpoint()
-                    i = futures[future]
-                    results[i] = future.result()
-                    done += len(texts[i])
+                    i, after = futures[future]
+                    try:
+                        if after:
+                            after_results[i] = future.result()
+                        else:
+                            results[i] = future.result()
+                    except Exception as error:
+                        retain(pages[i], source[pages[i]], error, "翻译")
+                    done += len(after_texts[i] if after else texts[i])
                     translated += 1
                     progress()
             except BaseException:
@@ -305,49 +344,78 @@ def translate_reading_pdf(job, translator, output, emit):
                 raise
         for i, (number, text) in enumerate(zip(pages, texts)):
             translator.control.checkpoint()
-            if boundary and number > boundary["page"]:
+            if reference_page_only(boundary, number):
                 with fitz.open() as fragment:
                     fragment.insert_pdf(source, from_page=number, to_page=number)
                     mono.insert_pdf(fragment)
                     if job.bilingual:
                         append_bilingual(dual, source, number, fragment, job.bilingual_layout)
                 continue
-            if boundary and number == boundary["page"] and not text.strip():
+            if reference_boxes(boundary, number) and not text.strip() and not after_texts.get(i) and number not in retained:
                 with fitz.open() as fragment:
                     fragment.insert_pdf(source, from_page=number, to_page=number)
                     mono.insert_pdf(fragment)
                     if job.bilingual:
                         append_bilingual(dual, source, number, fragment, job.bilingual_layout)
                 continue
-            if not text.strip():
+            if not text.strip() and not after_texts.get(i):
                 warnings.append(f"第 {number + 1} 页未识别到文字。")
-                result = "[No readable text on this page]"
+                if number not in retained:
+                    retain(number, source[number], DocumentError("未识别到文字"), "OCR/提取")
+                result = ""
             else:
                 result = results[i]
             rendered = output / "page.tmp.pdf"
+            after_rendered = output / "after-references.tmp.pdf"
             emit({"type": "progress", "stage": "排版中", "stage_key": "reading-layout", "work_done": i, "work_total": len(pages), "value": 80 + int(i * 15 / len(pages)), "message": f"排版第 {number + 1} 页"})
-            render_text_pdf(result, rendered, number + 1)
+            if number not in retained and text.strip():
+                try:
+                    render_text_pdf(result, rendered, number + 1)
+                except Exception as error:
+                    retain(number, source[number], error, "排版")
+            if number not in retained and after_texts.get(i):
+                try:
+                    render_text_pdf(after_results[i], after_rendered, number + 1)
+                except Exception as error:
+                    retain(number, source[number], error, "附录排版")
+            if number in retained:
+                with fitz.open() as fragment:
+                    fragment.insert_pdf(source, from_page=number, to_page=number)
+                    mark_pdf(fragment[0], retained[number], number)
+                    mono.insert_pdf(fragment)
+                    if job.bilingual:
+                        append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+                continue
             # Grafted PDF pages can retain their backing stream until dual closes.
-            with fitz.open(stream=rendered.read_bytes(), filetype="pdf") as fragment:
-                mono.insert_pdf(fragment)
-                if job.bilingual:
-                    append_bilingual(dual, source, number, fragment, job.bilingual_layout)
-            if boundary and number == boundary["page"]:
+            if text.strip():
+                with fitz.open(stream=rendered.read_bytes(), filetype="pdf") as fragment:
+                    mono.insert_pdf(fragment)
+                    if job.bilingual:
+                        append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+            if reference_boxes(boundary, number):
                 # Reading mode has no fixed page geometry. Append the original
                 # lower section as a continuation, without duplicating the body.
                 with fitz.open() as original:
-                    clip = fitz.Rect(0, boundary["y"], source[number].rect.width, source[number].rect.height)
                     tail = original.new_page(width=source[number].rect.width, height=source[number].rect.height)
-                    tail.show_pdf_page(clip, source, number, clip=clip)
+                    for box in reference_boxes(boundary, number):
+                        clip = fitz.Rect(box)
+                        tail.show_pdf_page(clip, source, number, clip=clip)
                     mono.insert_pdf(original)
                     if job.bilingual:
                         if job.bilingual_layout == "alternating":
                             dual.insert_pdf(original)
                         else:
                             append_bilingual(dual, source, number, original, job.bilingual_layout)
-            rendered.unlink()
+            if after_texts.get(i):
+                # Keep an appendix on the same source page after its retained bibliography.
+                with fitz.open(stream=after_rendered.read_bytes(), filetype="pdf") as fragment:
+                    mono.insert_pdf(fragment)
+                    if job.bilingual:
+                        append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+            rendered.unlink(missing_ok=True)
+            after_rendered.unlink(missing_ok=True)
             emit({"type": "progress", "stage": "排版中", "stage_key": "reading-layout", "work_done": i + 1, "work_total": len(pages), "value": 80 + int((i + 1) * 15 / len(pages)), "message": f"已完成 {i + 1}/{len(pages)} 页（原文第 {number + 1} 页）"})
-        if not translated and not boundary:
+        if not translated and not boundary and not retained:
             raise DocumentError("所选页面未识别到可翻译文字，请检查图片清晰度或页码。")
         outputs = []
         for enabled, label, document in ((job.mono, "译文", mono), (job.bilingual, "双语", dual)):
@@ -358,6 +426,9 @@ def translate_reading_pdf(job, translator, output, emit):
                 outputs.append(str(target))
     if scanned:
         warnings.append(f"{scanned} 页使用了本地 OCR；复杂表格、公式和手写文字需人工核对。")
+    if retained:
+        (output / "layout-report.json").write_text(json.dumps(dict(mode="reading", untranslated_regions=retained),
+            ensure_ascii=False, indent=2), encoding="utf-8")
     return outputs, warnings
 
 
@@ -367,7 +438,7 @@ def translate_layout_pdf(job, translator, output, emit):
         pages = selected_pages(job.pages, len(document), job.trial)
         kinds = {p: classify_page(document[p]) for p in pages}
         scanned = [p for p in pages if kinds[p] not in {"digital", "empty"}
-                   and (not job.skip_references or p <= job.reference_boundary["page"])]
+                   and not reference_page_only(job.reference_boundary if job.skip_references else {}, p)]
     if scanned:
         return translate_mixed_layout_pdf(job, translator, output, emit, pages, kinds)
     from babeldoc.babeldoc_exception.BabelDOCException import ScannedPDFError
@@ -379,7 +450,7 @@ def translate_layout_pdf(job, translator, output, emit):
                             "已停止本次输出，未切换阅读版；请按页试译以定位页面，已有译文缓存保留。") from exc
 
 
-def _translate_layout_pdf(job, translator, output, emit):
+def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False):
     translator.location = "PDF 保留版式引擎（无法可靠定位原始页码）"
     # Upstream internal adapters are isolated here and only used with tested versions.
     if version("pdf2zh-next") != "2.9.0" or version("babeldoc") != "0.6.2":
@@ -415,20 +486,28 @@ def _translate_layout_pdf(job, translator, output, emit):
 
     with open_document(job.source) as document:
         all_pages = selected_pages(job.pages, len(document), job.trial)
-        pages = [p for p in all_pages if not job.skip_references or p <= job.reference_boundary["page"]]
+        pages = [p for p in all_pages if not reference_page_only(job.reference_boundary if job.skip_references else {}, p)]
+    if not pages:
+        return (assemble_layout_pdf(job, all_pages, job.source, output, {}, translator.control),
+                ["所选页面均在已确认的参考文献范围内，保留原页，未请求翻译。"])
     started = active_clock(translator.control)
     policy = LayoutPolicy(translator.control, job.source, set(pages), translator=translator)
-    if job.skip_references:
+    if job.skip_references and job.reference_boundary:
         policy.reference_boundary = job.reference_boundary
         import pymupdf as fitz
-        number = job.reference_boundary["page"]
-        height, entries = policy.scientific.references[number]
-        boxes = [fitz.Rect(box) for box in job.reference_boundary["boxes"]]
-        policy.scientific.references[number] = (height, [entry for entry in entries if not any(
-            fitz.Rect(entry["box"]).intersects(box) for box in boxes)])
-        for page_no, (height, _) in list(policy.scientific.references.items()):
-            if page_no > number:
+        with open_document(job.source) as original:
+            for number in job.reference_boundary.get("uncertain_pages", []):
+                if number in pages:
+                    policy.retained_regions[number].append(dict(box=list(original[number].rect),
+                        coordinates="top-left", status="untranslated", stage="参考文献边界",
+                        reason="参考文献与正文分栏无法安全分离，保留本页原文；未宣称精确识别"))
+        for page_no, (height, entries) in list(policy.scientific.references.items()):
+            boxes = [fitz.Rect(box) for box in reference_boxes(job.reference_boundary, page_no)]
+            if reference_page_only(job.reference_boundary, page_no):
                 policy.scientific.references[page_no] = (height, [])
+            else:
+                policy.scientific.references[page_no] = (height, [entry for entry in entries if not any(
+                    fitz.Rect(entry["box"]).intersects(box) for box in boxes)])
     from linguafloat.document_graphics import DocumentEnhancer
     enhancer = DocumentEnhancer(translator,emit)
     graphic_key=""
@@ -449,8 +528,8 @@ def _translate_layout_pdf(job, translator, output, emit):
     emit({"type": "measurement", "name": "原文布局保护索引", "seconds": active_clock(translator.control) - started})
     from linguafloat.document_artifacts import LayoutSnapshot
     snapshot = LayoutSnapshot(translator.store.path.parent, job, pages,
-                              policy_key=("scientific-v3" if policy.scientific.affected else "")+graphic_key+
-                              ("-skip-references-v2-"+hashlib.sha256(json.dumps(job.reference_boundary,sort_keys=True).encode()).hexdigest()
+                              policy_key="variable-rules-v2-context-v1-"+("scientific-v4" if policy.scientific.affected else "")+graphic_key+
+                              ("-bibliography-only-v3-"+hashlib.sha256(json.dumps(job.reference_boundary,sort_keys=True).encode()).hexdigest()
                                if job.skip_references else ""))
     settings = SettingsModel.model_validate({
         "translation": {"lang_in": "zh" if job.source_language == "zh-Hans" else job.source_language,
@@ -471,10 +550,19 @@ def _translate_layout_pdf(job, translator, output, emit):
     original_request = translator.request
 
     def guarded_request(messages, **kwargs):
+        for paragraph in getattr(policy.active, "paragraphs", []):
+            policy.request_keys[id(paragraph)].add(translator.cache_key(messages))
         try:
             return original_request(messages, **kwargs)
         except Exception as exc:
-            failures.append(exc)
+            from linguafloat.document_failures import require_local
+            try:
+                require_local(exc)
+            except Exception:
+                failures.append(exc)
+                raise
+            for paragraph in ([] if getattr(policy.active, "batch", False) else getattr(policy.active, "paragraphs", [])):
+                policy.retain_error(paragraph, exc, "翻译")
             raise
 
     translator.request = guarded_request
@@ -521,7 +609,7 @@ def _translate_layout_pdf(job, translator, output, emit):
         emit({"type": "progress", "stage": "保存中", "stage_key": "assemble", "value": 95, "message": "生成单语和双语输出"})
         return assemble_layout_pdf(job, all_pages, path, output, policy.continuation_indices,
                                    translator.control, policy.margin_references, policy.continuation_layout,
-                                   policy.retained_regions,enhancer.apply)
+                                   policy.retained_regions, None if defer_graphics else enhancer.apply)
     # This worker already provides process isolation and cancellation. Avoid the
     # engine spawning more Python processes for saving/subsetting on Windows.
     original_save = PDFCreater.save_pdf_with_timeout
@@ -559,8 +647,14 @@ def _translate_layout_pdf(job, translator, output, emit):
             return
         if failures:
             raise failures[0]
+        if policy.failed_paragraphs:
+            # A retained source block must never become a complete translation snapshot.
+            return
         started = active_clock(translator.control)
         try:
+            snapshot.graphic_context = translator.graphic_context.records
+            snapshot.source_context = [dict(text=b.text, role=b.role, section=b.section)
+                                       for b in translator.source_context.blocks]
             snapshot.save(docs, engine.translation_config, media_boxes)
         except (OSError, ValueError, TypeError):
             policy.warnings.append("译后排版缓存未能保存；译文请求缓存仍保留。")
@@ -578,6 +672,9 @@ def _translate_layout_pdf(job, translator, output, emit):
                 from babeldoc.format.pdf.document_il.midend.typesetting import Typesetting
                 restored = True
                 docs, prepared, boxes = cached
+                translator.graphic_context.restore(snapshot.graphic_context)
+                from linguafloat.document_context import SourceBlock
+                translator.set_source_context(SourceBlock(**b) for b in snapshot.source_context)
                 translation_config.progress_monitor = monitor
                 emit({"type": "progress", "stage": "排版中", "stage_key": "snapshot",
                       "value": None, "message": "复用完整译后数据，跳过解析、版面识别和 API 翻译"})
@@ -593,15 +690,16 @@ def _translate_layout_pdf(job, translator, output, emit):
     def render_page(creater, page, translation_config):
         for paragraph in page.pdf_paragraph:
             paragraph_pages[id(paragraph)] = page.page_number + 1
+            policy.paragraph_pages[id(paragraph)] = page
         return original_page_render(creater, page, translation_config)
 
     def render(creater, paragraph):
-        characters = original_render(creater, paragraph)
         try:
+            characters = original_render(creater, paragraph)
             check_layout_paragraph(paragraph, characters, paragraph_pages.get(id(paragraph)))
-        except DocumentError as exc:
-            failures.append(exc)
-            raise
+        except Exception as exc:
+            policy.retain_error(paragraph, exc, "绘制/校验")
+            return []
         return characters
 
     def save(pdf, output_path, translation_config, garbage=1, deflate=True,
@@ -738,7 +836,7 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
     with open_document(job.source) as source, fitz.open(rendered_path) as rendered, fitz.open() as mono, fitz.open() as dual:
         for number in pages:
             control.checkpoint()
-            if job.skip_references and number > job.reference_boundary["page"]:
+            if reference_page_only(job.reference_boundary if job.skip_references else {}, number):
                 with fitz.open() as fragment:
                     fragment.insert_pdf(source, from_page=number, to_page=number)
                     mono.insert_pdf(fragment)
@@ -770,12 +868,18 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                         # Replace the whole graphic with the original vector/image content,
                         # rather than layering it over glyphs shifted by the body engine.
                         fragment[0].draw_rect(rect,color=None,fill=(1,1,1),overlay=True)
+                    else:
+                        # Clear partially emitted glyphs before restoring the exact source.
+                        fragment[0].add_redact_annot(rect, fill=(1,1,1), cross_out=False)
+                        fragment[0].apply_redactions(images=0, graphics=0, text=0)
                     fragment[0].show_pdf_page(rect, source, number, clip=rect)
                 if enhance:
                     enhance(source[number],fragment[0])
-                if job.skip_references and number == job.reference_boundary["page"]:
+                if job.skip_references and reference_boxes(job.reference_boundary, number):
                     from linguafloat.document_references import retain_pdf_tail
-                    retain_pdf_tail(fragment[0], source[number], job.reference_boundary)
+                    retain_pdf_tail(fragment[0], source[number], dict(boxes=reference_boxes(job.reference_boundary, number)))
+                from linguafloat.document_failures import mark_pdf
+                mark_pdf(fragment[0], (retained_regions or {}).get(number, []), number)
                 mono.insert_pdf(fragment)
                 if job.bilingual:
                     append_bilingual(dual, source, number, fragment, job.bilingual_layout)

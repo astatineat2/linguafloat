@@ -297,7 +297,8 @@ def test_retries_are_bounded_and_structured_requests_are_not_split(tmp_path, cod
         t.request(messages)
     assert str(code) in str(caught.value) and "SECRET" not in str(caught.value)
     assert len(submitted) == expected_calls
-    assert all(item == messages for item in submitted)
+    assert all(item == submitted[0] for item in submitted)
+    assert all(item[-1] == messages[-1] for item in submitted)
     counts = [e["name"] for e in events if e.get("type") == "measurement"]
     assert counts.count("请求重试") == expected_calls - 1
     if code in {429, 504}:

@@ -13,12 +13,13 @@ LinguaFloat 的适用源码按 AGPL-3.0-only 分发。每个第三方组件保�
 | qtawesome | 代码 MIT，打包的图标字体分别保留许可 |
 | PyInstaller | GPL 与其打包例外 |
 | Python | PSF 及其第三方声明 |
+| CC Switch 4.0.4 SQLite schema | MIT，Copyright (c) 2025 Jason Young；结构用于兼容 SQL 交换，不打包其运行程序，许可证见 LICENSES/CC-Switch-4.0.4.txt |
 
 精确安装版本和已收集的许可证见 `LICENSES/app`、`LICENSES/document` 和依赖锁文件。
 本版已按实际文件核对依赖版本、OCR 权重、图标字体及匹配源码；清单包含构建环境的部分工具，并不代表每个工具都参与运行。
 字体的生成工具许可与字体本身许可需要分开处理。模型源码许可与实际权重许可也需分开核对。
 
-公开发行时，对应源码附件应匹配同版二进制，并含适用的构建材料与第三方源码材料。LinguaFloat [开发源码仓库](https://github.com/astatineat2/linguafloat)已公开；下载者依法获得的再分发权不受额外保密约定限制。
+公开发行时，对应源码附件应匹配同版二进制，并含适用的构建材料与第三方源码材料。LinguaFloat 开发仓库按作者要求保持私有；已经公开发行的版本仍在公开 Releases 提供对应源码。下载者依法获得的再分发权不受额外保密约定限制。
 发行页自动生成的“Source code.zip”只属于公开下载仓库；请下载明确标为 `corresponding-source.zip` 的附件。
 
 官方依据：

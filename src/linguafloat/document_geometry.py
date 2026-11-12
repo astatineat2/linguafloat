@@ -111,9 +111,46 @@ def join_fragmented_paragraphs(page, words=(), source_characters=()):
     return changes
 
 
+def _rule_symbol(page, rule):
+    """Require an isolated italic/math glyph and a short, aligned source rule."""
+    from linguafloat.document_scientific import composition_chars
+    fonts = {font.font_id: font.name or "" for font in page.pdf_font}
+    for obj in page.pdf_xobject:
+        if obj.xobj_id == rule.xobj_id:
+            fonts.update({font.font_id: font.name or "" for font in obj.pdf_font})
+    matches = []
+    b = rule.box
+    for paragraph in page.pdf_paragraph:
+        if paragraph.xobj_id != rule.xobj_id:
+            continue
+        chars = [c for part in paragraph.pdf_paragraph_composition for c in composition_chars(part)
+                 if (c.char_unicode or "").strip() and box_of(c)]
+        for part in paragraph.pdf_paragraph_composition:
+            if part.pdf_formula:
+                continue
+            for char in composition_chars(part):
+                c = box_of(char)
+                style = char.pdf_style
+                if not c or not style or not re.fullmatch(r"[A-Za-zα-ωΑ-Ω]", char.char_unicode or ""):
+                    continue
+                if not re.search(r"italic|regita|oblique|math|symbol|cmsy|cmmi", fonts.get(style.font_id, ""), re.I):
+                    continue
+                size = style.font_size or 0
+                if (not size or abs(b.x-c.x) > .8 or abs(b.x2-c.x2) > .8
+                        or min(abs(b.y-c.y), abs(b.y-c.y2)) > size*.3):
+                    continue
+                if any(other is not char and abs((box_of(other).y+box_of(other).y2-c.y-c.y2)/2) < size*.3
+                       and min(abs(box_of(other).x-c.x2), abs(box_of(other).x2-c.x)) < size*.14
+                       for other in chars):
+                    continue
+                matches.append((paragraph, part, char))
+    return matches[0] if len(matches) == 1 else None
+
+
 def attach_formula_rules(page):
-    """Move verified numerator/denominator rules from the page into the formula."""
+    """Give verified fractions and variable accents one geometry owner."""
     from linguafloat.document_scientific import merge_formula_runs
+    from babeldoc.format.pdf.document_il import PdfFormula, PdfParagraphComposition
     formulas = []
     for paragraph in page.pdf_paragraph:
         size = paragraph.pdf_style.font_size if paragraph.pdf_style else 0
@@ -129,11 +166,31 @@ def attach_formula_rules(page):
             if curve.xobj_id != xobj_id:
                 continue
             f = formula.box
-            if not f or not (f.x-.5 <= b.x and b.x2 <= f.x2+.5 and f.y < b.y < f.y2):
+            if not f:
+                continue
+            text = "".join(c.char_unicode or "" for c in formula.pdf_character).strip()
+            if (re.fullmatch(r"[A-Za-zα-ωΑ-Ω]", text) and abs(f.x-b.x)<.8 and abs(f.x2-b.x2)<.8
+                    and min(abs(f.y-b.y), abs(f.y2-b.y)) < max(1, (f.y2-f.y)*.3)):
+                matches.append(formula)
+                continue
+            if not (f.x-.5 <= b.x and b.x2 <= f.x2+.5 and f.y < b.y < f.y2):
                 continue
             chars = [box_of(c) for c in formula.pdf_character if (c.char_unicode or "").strip()
                      and box_of(c) and b.x <= (box_of(c).x+box_of(c).x2)/2 <= b.x2]
             if any(c.y >= b.y-.15 for c in chars) and any(c.y2 <= b.y+.15 for c in chars):
+                matches.append(formula)
+        if not matches:
+            candidate = _rule_symbol(page, curve)
+            if candidate:
+                from linguafloat.document_scientific import composition_chars
+                paragraph, part, char = candidate
+                formula = PdfFormula(box=union([box_of(char)]), pdf_character=[char],
+                                     x_offset=0, y_offset=0, x_advance=0)
+                parts = [PdfParagraphComposition(pdf_formula=formula) if c is char
+                         else PdfParagraphComposition(pdf_character=c) for c in composition_chars(part)]
+                index = paragraph.pdf_paragraph_composition.index(part)
+                paragraph.pdf_paragraph_composition[index:index+1] = parts
+                formulas.append((formula, paragraph.xobj_id))
                 matches.append(formula)
         if len(matches) == 1:
             formula = matches[0]

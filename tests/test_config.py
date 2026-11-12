@@ -35,11 +35,11 @@ def test_config_round_trip(tmp_path):
     assert "api" not in json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_reference_option_defaults_off_and_survives_restart(tmp_path):
+def test_reference_protection_defaults_on_and_migrates_legacy_option(tmp_path):
     store = ConfigStore(tmp_path / "config.json")
     settings = store.load()
-    assert not settings.document_skip_references
-    settings.document_skip_references = True
+    assert settings.document_skip_references
+    settings.document_skip_references = False
     store.save(settings)
     assert ConfigStore(store.path).load().document_skip_references
 

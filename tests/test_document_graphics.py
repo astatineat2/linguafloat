@@ -58,8 +58,9 @@ def test_translation_reuses_cache_and_preserves_data_pixels(tmp_path):
         job.relayout_only=True
         t=DocumentTranslator(job,'',store,JobControl(),lambda _:None,client)
         with fitz.open(path) as source,fitz.open(path) as target:
-            with pytest.raises(DocumentError,match='缓存不完整'):
-                apply_graphics(source[0],target[0],t,analyzer,'digest',{'label':{'source':'inner diameter'}})
+            records = apply_graphics(source[0],target[0],t,analyzer,'digest',{'label':{'source':'inner diameter'}})
+            assert records[0]['status'] == 'needs_review' and '缓存' in records[0]['reason']
+            assert target[0].get_pixmap().samples == source[0].get_pixmap().samples
         assert len(requests)==1
     finally:store.close()
 

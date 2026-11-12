@@ -58,12 +58,13 @@ def _decoder(kind):
 class LayoutSnapshot:
     def __init__(self, directory, job, pages, policy_key=""):
         from importlib.metadata import version
+        from linguafloat.document_context import POLICY
         with open(job.source, "rb") as handle:
             digest = hashlib.file_digest(handle, "sha256").hexdigest()
         scope = dict(schema=1, source=digest, pages=pages, target=job.target, language=job.source_language,
                      provider={k: job.provider.get(k) for k in ("id", "base_url", "model", "api_mode")},
                      versions={name: version(name) for name in ("babeldoc", "pdf2zh-next", "pymupdf", "xsdata")},
-                     translation_policy="documents-v1-subscript-v1-no-glossary-no-table")
+                     translation_policy=POLICY + "-subscript-v1-no-glossary-no-table")
         from linguafloat.api_compat import request_options
         options = request_options(job.provider)
         if options:
@@ -73,6 +74,8 @@ class LayoutSnapshot:
         self.key = hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
         self.folder = Path(directory) / "layout-cache"
         self.path = self.folder / (self.key + ".zip")
+        self.graphic_context = []
+        self.source_context = []
 
     def load(self, config, emit=None):
         if not self.path.is_file():
@@ -89,6 +92,16 @@ class LayoutSnapshot:
                 manifest = json.loads(archive.read("manifest.json"))
                 if manifest["key"] != self.key:
                     return None
+                from linguafloat.document_context import GraphicContext
+                context = GraphicContext()
+                context.restore(manifest.get("graphic_context", []))
+                self.graphic_context = context.records
+                blocks = manifest.get("source_context", [])
+                if (not isinstance(blocks, list) or len(blocks) > 20000
+                        or any(not isinstance(b, dict) or set(b) != {"text", "role", "section"}
+                               or not all(isinstance(v, str) for v in b.values()) for b in blocks)):
+                    return None
+                self.source_context = blocks
                 data = {name: archive.read(name) for name in ("translated.json", "input.pdf")}
                 measured("排版缓存读取及解压", started)
                 started = time.perf_counter()
@@ -120,7 +133,8 @@ class LayoutSnapshot:
                 "input.pdf": config.get_working_file_path("input.pdf").read_bytes()}
         if sum(map(len, data.values())) > 300 * 1024 ** 2:
             return False
-        manifest = dict(key=self.key, mediabox=mediabox,
+        manifest = dict(key=self.key, mediabox=mediabox, graphic_context=self.graphic_context,
+                        source_context=self.source_context,
                         hashes={name: hashlib.sha256(value).hexdigest() for name, value in data.items()})
         temporary = self.folder / (self.key + "." + uuid4().hex + ".tmp")
         try:

@@ -12,3 +12,9 @@ The user requests versioned releases from 2026-10-12 onward.
 - Final delivery must clearly state version, main changes, verified scope, known limitations, and the one supported launch path.
 
 See RELEASES.md for the baseline and release process.
+
+# Repository and publication authorization
+
+- The development repository astatineat2/linguafloat is private again at the owner's request on 2026-11-05. Keep it private unless the owner explicitly asks to open it in a subsequent instruction.
+- v0.11.2, v0.12.0, v0.13.0 v0.14.0 v0.14.1 v0.15.0 v0.15.1 v0.15.2 and v0.15.3 are local-only deliveries. Do not push code, upload assets, create a GitHub release/tag, or update the public update metadata for this delivery. The public download repository and existing corresponding-source assets remain available.
+- On 2026-11-12 the owner explicitly authorized synchronizing the current v0.17.0 source and preparing a draft in the existing release repository, including portable ZIP, installer and checksums. This supersedes the earlier push restriction for the current source snapshot, not historical standalone releases. Installer acceptance remains paused; do not resume it, publish the draft, change repository visibility or update stable-channel metadata without further authorization.

@@ -186,15 +186,13 @@ class DocumentJob:
             raise DocumentError("图表文字翻译目前仅适用于 PDF / 图片的保留版式模式。")
         if not isinstance(self.graphic_overrides,dict):
             raise DocumentError("图表校对数据无效。")
-        if self.skip_references and (self.pages or self.trial):
-            raise DocumentError("‘参考文献及后续内容不翻译’需处理完整文档；请清空页码范围并关闭试译。")
         if type(self.request_timeout) is not int or not 30 <= self.request_timeout <= 600:
             raise DocumentError("文档请求超时应为 30–600 秒。")
         if self.pages and source.suffix.lower() == ".docx":
             raise DocumentError("Word 页码随排版变化，暂不支持页码范围；试译将处理前 8 个非空段落。")
         if not self.provider.get("base_url") or not self.provider.get("model"):
             raise DocumentError("请先配置供应商的接口地址和模型。")
-        if self.provider.get("api_mode") not in {"responses", "chat_completions"}:
+        if self.provider.get("api_mode") not in {"responses", "chat_completions", "anthropic", "gemini"}:
             raise DocumentError("不支持该 API 接口模式。")
 
 
@@ -239,6 +237,7 @@ class JobStore:
             info = json.loads(existing[0]) if existing else {}
             now = time.time()
             if not existing:
+                from linguafloat import __version__
                 source = Path(job.source)
                 info.update(file_size=source.stat().st_size if source.is_file() else None,
                             file_type=source.suffix[1:].upper(), trial=job.trial,
@@ -250,6 +249,10 @@ class JobStore:
                     pages=job.pages, target=job.target, source_language=job.source_language,
                     pdf_mode=job.pdf_mode, relayout_only=job.relayout_only,
                     skip_references=job.skip_references,
+                    reference_policy="bibliography-only-v3" if job.skip_references else "disabled",
+                    app_version=__version__, mono=job.mono, bilingual=job.bilingual,
+                    bilingual_layout=job.bilingual_layout, translate_tables=job.translate_tables,
+                    translate_figures=job.translate_figures, request_timeout=job.request_timeout,
                     document_concurrency=job.provider.get("document_concurrency", 2))
             if status == "running" and "started_at" not in info:
                 info.update(started_at=now, input_tokens=0, output_tokens=0, total_tokens=0,
@@ -305,11 +308,12 @@ class DocumentTranslator:
         self._key = key or ""
         self.client = client or OpenAI(api_key=key or "cache-only", base_url=normalize_base_url(self.provider["base_url"]),
                                       timeout=httpx.Timeout(job.request_timeout, connect=15, write=30, pool=15), max_retries=0)
-        self.adapter = ApiAdapter(self.client, self.provider)
+        self.adapter = ApiAdapter(self.client, self.provider, session_scope="document:" + job.job_id)
         self.lock = threading.RLock()
         from linguafloat.document_scheduler import RequestGate
         self.gate = RequestGate(self.provider, store, control, lambda seconds: self.wait(seconds))
         self.inflight = {}
+        self.fatal_error = None
         self.calls = self.hits = 0
         self.request_sequence = 0
         self.request_attempts = {}
@@ -321,6 +325,30 @@ class DocumentTranslator:
         self.retries = max(0, min(3, int(self.provider.get("retries", 2))))
         self.token_usage = dict(input_tokens=0, output_tokens=0, total_tokens=0,
                                unreported_requests=0, reported_requests=0)
+        from linguafloat.document_context import SourceContext, GraphicContext
+        self.source_context = SourceContext()
+        self.graphic_context = GraphicContext()
+
+    def set_source_context(self, blocks):
+        from linguafloat.document_context import SourceContext
+        self.source_context = SourceContext(blocks)
+
+    def reference_context(self, messages):
+        from linguafloat.document_context import request_source
+        return self.source_context.packet(request_source(messages))
+
+    def contextual_messages(self, messages):
+        from linguafloat.document_context import INSTRUCTIONS
+        result = [dict(m) for m in messages]
+        if result and result[0].get("role") == "system":
+            result[0]["content"] += "\n" + INSTRUCTIONS
+        else:
+            result.insert(0, {"role": "system", "content": INSTRUCTIONS})
+        context = self.reference_context(messages)
+        if context:
+            result.insert(-1, {"role": "user", "content": json.dumps(
+                {"reference_only": context}, ensure_ascii=False)})
+        return result
 
     @property
     def location(self):
@@ -364,11 +392,13 @@ class DocumentTranslator:
             {"role": "user", "content": text}]
 
     def cache_key(self, messages):
+        from linguafloat.document_context import POLICY
         scope = {k: self.provider.get(k) for k in ("id", "base_url", "model", "api_mode")}
         options = request_options(self.provider)
         if options:
             scope["request_options"] = options
-        payload = json.dumps(["documents-v1", scope, self.job.target, messages], ensure_ascii=False, sort_keys=True)
+        payload = json.dumps([POLICY, scope, self.job.target, messages, self.reference_context(messages)],
+                             ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()
 
     def translate_fragment(self, text, context, *, part="公式旁文字"):
@@ -411,6 +441,8 @@ class DocumentTranslator:
         label = self.location + (" · " + part if part else "")
         self.control.checkpoint()
         with self.lock:
+            if self.fatal_error is not None:
+                raise self.fatal_error
             self.request_sequence += 1
             identity = f"R{self.request_sequence:04d}"
             started = time.monotonic()
@@ -442,11 +474,14 @@ class DocumentTranslator:
             return value
         try:
             self.trace_request(identity, "queued", label, digest, started)
-            value = self._send(messages, budget, adaptive, label, digest, identity, started)
+            value = self._send(self.contextual_messages(messages), budget, adaptive, label, digest, identity, started)
             future.set_result(value)
             self.control.checkpoint()
             return value
         except BaseException as exc:
+            if isinstance(exc, DocumentRequestError) and not (adaptive and exc.timeout):
+                with self.lock:
+                    self.fatal_error = exc
             self.trace_request(identity, "cancelled" if isinstance(exc, Cancelled) else "failed",
                                label, digest, started, **getattr(exc, "details", {"error_type": type(exc).__name__}))
             if not future.done():
@@ -462,7 +497,7 @@ class DocumentTranslator:
         try:
             self.adapter.validate_request()
         except ApiResponseError as exc:
-            raise DocumentError(f"{label} · 请求 {identity}：{exc}") from None
+            raise DocumentRequestError(f"{label} · 请求 {identity}：{exc}") from None
         attempt = 0
         while True:
             started = active_clock(self.control)
@@ -471,6 +506,8 @@ class DocumentTranslator:
             actual = None
             try:
                 self.control.checkpoint()
+                if self.fatal_error is not None:
+                    raise self.fatal_error
                 # Persist before sending so a killed/timeout request is never reported as zero usage.
                 with self.lock:
                     self.token_usage["unreported_requests"] += 1
@@ -502,7 +539,15 @@ class DocumentTranslator:
                 retryable = isinstance(exc, openai.APIConnectionError) or code in {408, 429, 500, 502, 503, 504}
                 reason, details = error_details(exc, self.provider, key=self._key,
                     source_texts=tuple(m.get("content", "") for m in messages), request_id=identity)
+                if isinstance(exc, ApiResponseError):
+                    raise DocumentError(f"[翻译响应校验失败] {reason}") from None
                 delay = retry_delay(exc, attempt)
+                if code in {401, 402, 403} or any(word in str(details.get("supplier_error_code", "")).lower()
+                        for word in ("quota", "balance", "credit", "billing")):
+                    error = DocumentRequestError(f"{label} · 请求 {identity}：{reason}", details=details)
+                    with self.lock:
+                        self.fatal_error = error
+                    raise error from None
                 if code == 429:
                     self.emit({"type": "measurement", "name": "HTTP 429 限流", "seconds": 0})
                 if timed_out:

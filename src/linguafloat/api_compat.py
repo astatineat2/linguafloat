@@ -3,9 +3,15 @@ from __future__ import annotations
 
 import copy
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
+
+from linguafloat import __version__
+
+API_MODES = {"responses", "chat_completions", "anthropic", "gemini"}
 
 
 def field(value, name, default=None):
@@ -28,6 +34,27 @@ def normalize_base_url(address: str) -> str:
     if parsed.hostname == "api.openai.com" and not path:
         path = "/v1"
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def opencode_go_headers(profile, *, session_scope=None):
+    """Use our own identity only on the official Go OpenAI endpoint.
+
+    One adapter represents one conversation. Document jobs supply a persistent
+    job ID so concurrent requests, retries and restoration share that session.
+    Session metadata does not change translation/cache compatibility.
+    """
+    try:
+        parsed = urlsplit(normalize_base_url(field(profile, "base_url", "")))
+        port = parsed.port
+    except ValueError:
+        return {}
+    if (parsed.scheme != "https" or parsed.hostname != "opencode.ai"
+            or port not in {None, 443}
+            or parsed.path not in {"/inference/go/openai/v1", "/zen/go/v1"}):
+        return {}
+    session = (uuid.uuid5(uuid.NAMESPACE_URL, "linguafloat:opencode-go:" + session_scope)
+               if session_scope else uuid.uuid4())
+    return {"User-Agent": f"LinguaFloat/{__version__}", "x-opencode-session": str(session)}
 
 
 OPTION_DEFAULTS = {"output_token_limit": 0, "chat_token_parameter": "max_completion_tokens",
@@ -74,8 +101,17 @@ def text_content(content):
 
 
 def token_usage(result, mode):
+    if mode == "gemini":
+        usage = field(result, "usageMetadata", {})
+        incoming, outgoing = field(usage, "promptTokenCount"), field(usage, "candidatesTokenCount")
+        if not all(type(v) is int and v >= 0 for v in (incoming, outgoing)):
+            return None
+        thoughts = field(usage, "thoughtsTokenCount", 0)
+        outgoing += thoughts if type(thoughts) is int and thoughts >= 0 else 0
+        total = field(usage, "totalTokenCount")
+        return incoming, outgoing, total if type(total) is int and total >= 0 else incoming + outgoing
     usage = field(result, "usage")
-    names = ("input_tokens", "output_tokens") if mode == "responses" else ("prompt_tokens", "completion_tokens")
+    names = ("input_tokens", "output_tokens") if mode in {"responses", "anthropic"} else ("prompt_tokens", "completion_tokens")
     incoming, outgoing = (field(usage, name) for name in names)
     if not all(type(v) is int and v >= 0 for v in (incoming, outgoing)):
         return None
@@ -84,22 +120,91 @@ def token_usage(result, mode):
 
 
 class ApiAdapter:
-    def __init__(self, client, profile):
+    def __init__(self, client, profile, *, session_scope=None):
         self.client, self.profile = client, copy.deepcopy(profile)
         validate_options(self.profile)
+        self._headers = opencode_go_headers(self.profile, session_scope=session_scope)
 
     def validate_request(self):
         mode = field(self.profile, "api_mode")
-        if mode not in {"responses", "chat_completions"}:
+        if mode not in API_MODES:
             raise ApiResponseError("不支持的 API 接口类型。")
         if field(self.profile, "thinking_mode", "") and mode != "chat_completions":
             raise ApiResponseError("供应商思考开关仅适用于 Chat Completions；当前 Responses 配置请使用默认或供应商明确支持的推理强度。")
+        if mode in {"anthropic", "gemini"} and field(self.profile, "reasoning_effort", ""):
+            raise ApiResponseError("当前原生接口未配置对应推理参数，请将推理强度设为默认。")
+
+    def native_headers(self):
+        from openai import Omit
+        headers = {"Authorization": Omit()}
+        if field(self.profile, "native_auth", "api_key") == "bearer":
+            headers["Authorization"] = "Bearer " + self.client.api_key
+        elif field(self.profile, "api_mode") == "anthropic":
+            headers["x-api-key"] = self.client.api_key
+        else:
+            headers["x-goog-api-key"] = self.client.api_key
+        if field(self.profile, "api_mode") == "anthropic":
+            headers["anthropic-version"] = "2023-06-01"
+        return headers
+
+    def native_prefix(self):
+        path = urlsplit(field(self.profile, "base_url")).path.rstrip("/")
+        if field(self.profile, "api_mode") == "anthropic":
+            return "" if path.endswith("/v1") else "v1/"
+        return "" if path.endswith(("/v1beta", "/v1")) else "v1beta/"
+
+    def _native_request(self, messages, on_response):
+        mode = field(self.profile, "api_mode")
+        system = "\n".join(m["content"] for m in messages if m["role"] in {"system", "developer"})
+        turns = [m for m in messages if m["role"] not in {"system", "developer"}]
+        limit = field(self.profile, "output_token_limit", 0)
+        if mode == "anthropic":
+            # Messages requires max_tokens, unlike OpenAI's optional length limit.
+            body = {"model": field(self.profile, "model"), "max_tokens": limit or 4096, "messages": turns}
+            if system:
+                body["system"] = system
+            endpoint = self.native_prefix() + "messages"
+        else:
+            body = {"contents": [{"role": "model" if m["role"] == "assistant" else "user",
+                                   "parts": [{"text": m["content"]}]} for m in turns]}
+            if system:
+                body["systemInstruction"] = {"parts": [{"text": system}]}
+            if limit:
+                body["generationConfig"] = {"maxOutputTokens": limit}
+            model = field(self.profile, "model").removeprefix("models/")
+            endpoint = self.native_prefix() + "models/" + quote(model, safe="") + ":generateContent"
+        from openai._constants import RAW_RESPONSE_HEADER
+        response = self.client.post(endpoint, cast_to=dict[str, Any], body=body,
+            options={"headers": {**self.native_headers(), RAW_RESPONSE_HEADER: "true"}})
+        raw = response.parse()
+        if not isinstance(raw, dict):
+            raise ApiResponseError("原生接口返回格式不正确。")
+        raw["_request_id"] = response.headers.get("request-id") or response.headers.get("x-request-id") or response.headers.get("x-goog-request-id")
+        if on_response:
+            on_response(raw)
+        if mode == "anthropic":
+            if field(raw, "stop_reason") not in {"end_turn", "stop_sequence"}:
+                raise ApiResponseError("Messages 输出未完整结束或返回工具调用，未保存译文。")
+            text = text_content(field(raw, "content"))
+        else:
+            candidates = field(raw, "candidates", []) or []
+            if not candidates or field(candidates[0], "finishReason") != "STOP":
+                raise ApiResponseError("Gemini 输出为空、被过滤或未完整结束，未保存译文。")
+            parts = field(field(candidates[0], "content"), "parts", []) or []
+            if any(field(p, "functionCall") for p in parts):
+                raise ApiResponseError("Gemini 返回工具调用，未保存译文。")
+            text = "".join(field(p, "text", "") for p in parts if not field(p, "thought", False))
+        if not isinstance(text, str) or not text.strip():
+            raise ApiResponseError("模型没有返回翻译结果。")
+        return ApiResult(text.strip(), raw, field(raw, "_request_id"))
 
     def request(self, messages, *, instructions=None, input_text=None, on_response=None):
         self.validate_request()
         profile = self.profile
         mode = field(profile, "api_mode")
         kwargs = {"model": field(profile, "model")}
+        if self._headers:
+            kwargs["extra_headers"] = dict(self._headers)
         messages = copy.deepcopy(messages)
         role = field(profile, "instruction_role", "system")
         for message in messages:
@@ -108,6 +213,8 @@ class ApiAdapter:
         limit = field(profile, "output_token_limit", 0)
         effort = field(profile, "reasoning_effort", "")
         thinking = field(profile, "thinking_mode", "")
+        if mode in {"anthropic", "gemini"}:
+            return self._native_request(messages, on_response)
         if mode == "responses":
             if instructions is not None and role == "system":
                 kwargs.update(instructions=instructions, input=input_text)

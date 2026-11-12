@@ -277,9 +277,10 @@ def test_restoration_failure_is_visible_and_does_not_pause_ocr(controller, monke
     assert c._ordinary_allowed() and "正在监听" in c.window.status_label.text()
 
 
-def test_game_self_test_reports_intentional_disable_and_still_checks_ocr_api(controller):
+def test_game_self_test_reports_intentional_disable_and_still_checks_ocr_api(controller, monkeypatch):
     c, _, _ = controller
     c.thread_pool = FakeThreadPool()
+    monkeypatch.setattr(c.screen_reader.pool, "start", c.thread_pool.start)
     c._save_game_mode("on")
     c._run_self_test()
     c.thread_pool.tasks[0].signals.succeeded.emit(0, b"", "Hello")
@@ -378,7 +379,7 @@ def test_game_preserves_region_refresh_resize_move_and_pause(controller, applica
     try:
         assert reader.start_region(screen, region)
         c._save_game_mode("on")
-        assert reader.state.running and reader.timer.isActive()
+        assert reader.state.running and (reader.timer.isActive() or reader.settle_timer.isActive())
         reader._outline_move_started()
         moved = region.adjusted(20, 20, 60, 40)
         reader._outline_move_finished(moved)

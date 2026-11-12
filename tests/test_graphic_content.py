@@ -25,7 +25,7 @@ def test_math_operator_protected_but_normal_maximum_translated():
         p=doc.new_page()
         r=dict(id='max',text='max',box=[40,40,65,50],confidence=.99,reason='')
         area=dict(id='a',kind='table',box=[30,30,200,150],regions=[r],lines=[dict(box=[40,40,160,50],text='max (|∆(B/r)|)')])
-        t=NS(control=JobControl(),job=NS(translate_tables=True,translate_figures=True,target='ja'),
+        t=NS(control=JobControl(),job=NS(translate_tables=True,translate_figures=True,target='ja',skip_references=False),
              translate_fragment=lambda *a,**k:pytest.fail('Math must not call translator'))
         records=apply_graphics(p,p,t,NS(discover=lambda *a:[area]),'x')
         assert records[0]['status']=='protected'
@@ -52,7 +52,7 @@ def test_ruled_multitier_header_wraps_before_shrinking():
         assert plan[0]['column']==1 and plan[1]['column']==2
         assert plan[0]['layout_box'][1]==plan[1]['layout_box'][1]
         assert plan[0]['layout_box'][3]>plan[1]['layout_box'][3]
-        t=NS(control=JobControl(),job=NS(translate_tables=True,translate_figures=True,target='zh-Hans'),
+        t=NS(control=JobControl(),job=NS(translate_tables=True,translate_figures=True,target='zh-Hans',skip_references=False),
              translate_fragment=lambda text,*a,**k:'目标磁场参数详细说明' if text=='Target field' else '线圈效率')
         with f.open(stream=doc.tobytes(),filetype='pdf') as output:
             records=apply_graphics(p,output[0],t,NS(discover=lambda *a:[area],emit=lambda e:None),'x')

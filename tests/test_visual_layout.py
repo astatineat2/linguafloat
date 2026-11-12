@@ -16,11 +16,16 @@ from linguafloat.ui import MainWindow, apply_ui_font
 def window():
     app = QApplication.instance() or QApplication([])
     old_font = app.font()
+    # Match startup: initialize the application font before constructing widgets.
+    apply_ui_font(app, 14)
     instance = MainWindow(AppSettings(), "missing")
     yield app, instance
     instance.allow_close()
+    instance.provider_editor.hide()
     instance.close()
-    apply_ui_font(app, old_font.pointSize())
+    instance.deleteLater()
+    app.processEvents()
+    app.setFont(old_font)
 
 
 def rect_in(widget, ancestor):
@@ -36,20 +41,24 @@ def test_primary_actions_stay_visible_at_supported_sizes(window, size, points):
     w.show()
     app.processEvents()
     assert (w.width(), w.height()) == size
-    assert w.provider_list.font().pointSize() == points
-    assert w.active_model_combo.view().font().pointSize() == points
+    assert w.provider_list.font().pixelSize() == points
+    assert w.active_model_combo.view().font().pixelSize() == points
     for page, controls, scroll in (
         (0, [w.function_save_button], w.function_scroll),
         (1, [w.save_button, w.test_connection_button, w.use_provider_button], w.config_scroll),
     ):
         w.pages.setCurrentIndex(page)
+        if page == 1:
+            w.open_provider_editor(w._editing_id)
+            w.provider_editor.resize(*size)
+        container = w.provider_editor if page == 1 else w
         app.processEvents()
         for at_bottom in (False, True):
             scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum() if at_bottom else 0)
             app.processEvents()
             for button in controls:
                 assert button.isVisible()
-                assert w.rect().contains(rect_in(button, w))
+                assert container.rect().contains(rect_in(button, container))
                 assert button.width() >= button.minimumSizeHint().width()
             assert scroll.horizontalScrollBar().maximum() == 0
     for first, second in zip((w.active_provider_combo, w.active_model_combo),
@@ -92,6 +101,8 @@ def test_api_compatibility_controls_fit_expanded_settings(window, size):
     apply_ui_font(app, 14)
     w.resize(*size)
     w.pages.setCurrentIndex(1)
+    w.open_provider_editor(w._editing_id)
+    w.provider_editor.resize(*size)
     w.advanced_toggle.setChecked(True)
     w.show()
     app.processEvents()
@@ -105,4 +116,4 @@ def test_api_compatibility_controls_fit_expanded_settings(window, size):
         assert widget.width() >= widget.minimumSizeHint().width()
     for i, first in enumerate(fields):
         for second in fields[i + 1:]:
-            assert not rect_in(first, w).intersects(rect_in(second, w))
+            assert not rect_in(first, w.provider_editor).intersects(rect_in(second, w.provider_editor))

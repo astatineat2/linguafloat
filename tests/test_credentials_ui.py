@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit
 import linguafloat.app as app_module
 import linguafloat.config as config_module
 from linguafloat.config import AppSettings, ConfigStore, ProviderProfile
-from linguafloat.ui import MainWindow
+from linguafloat.ui import MainWindow, apply_ui_font
 
 
 @pytest.fixture
@@ -30,12 +30,44 @@ def controller(application, monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "ConfigStore", lambda: store)
     monkeypatch.setattr(app_module.AppController, "_configure_triggers", lambda *args: None)
     instance = app_module.AppController(application)
-    yield instance, secrets, store
-    instance.window.allow_close()
-    instance.window.close()
-    instance.overlay.close()
-    instance.action_button.close()
-    instance.game_monitor.stop()
+    try:
+        yield instance, secrets, store
+    finally:
+        instance.game_monitor.stop()
+        instance.window.allow_close()
+        instance.window.close()
+        instance.overlay.close()
+        instance.action_button.close()
+
+
+def test_repeated_save_preserves_application_style_and_fonts(controller, application, monkeypatch):
+    c, _, _ = controller
+    style = application.style()
+    resets = []
+    monkeypatch.setattr(application, "setStyle", lambda *args: resets.append("style"))
+    monkeypatch.setattr(application, "setFont", lambda *args: resets.append("font"))
+    c.window.save_button.click()
+    c.window.save_button.click()
+    assert resets == []
+    assert application.style() is style
+
+
+@pytest.mark.parametrize("pixel_size", [12, 16])
+def test_apply_ui_font_updates_existing_item_views(controller, application, pixel_size):
+    c, _, _ = controller
+    provider_list = c.window.provider_list
+    model_view = c.window.active_model_combo.view()
+    assert provider_list.font().pixelSize() == 14
+    assert model_view.font().pixelSize() == 14
+    try:
+        apply_ui_font(application, pixel_size)
+        application.processEvents()
+        assert application.font().pixelSize() == pixel_size
+        assert application.font("QAbstractItemView").pixelSize() == pixel_size
+        assert provider_list.font().pixelSize() == pixel_size
+        assert model_view.font().pixelSize() == pixel_size
+    finally:
+        apply_ui_font(application, 14)
 
 
 def test_saved_key_is_masked_and_eye_toggles_without_editing(controller):
@@ -51,6 +83,41 @@ def test_saved_key_is_masked_and_eye_toggles_without_editing(controller):
     assert not field.isModified()
     c.window.key_visibility_action.trigger()
     assert field.echoMode() == QLineEdit.EchoMode.Password
+
+
+def test_cc_import_controller_refreshes_without_activating(controller, monkeypatch):
+    from linguafloat.cc_switch import Candidate
+    c, secrets, store = controller
+    candidate = Candidate("codex", "test", ProviderProfile("cc-test", "CC Test", "https://import.example/v1", "import-model", env_key=""), "synthetic-import-key")
+    from pathlib import Path
+    monkeypatch.setattr(app_module.QFileDialog, "getOpenFileName", lambda *a: ("synthetic.sql", ""))
+    monkeypatch.setattr(app_module, "read_candidates", lambda _: [candidate])
+    active = c.settings.active_provider
+    c._import_batch("sql", True)
+    assert c.settings.active_provider == active
+    assert store.load().active_provider == active
+    assert secrets["cc-test"] == "synthetic-import-key"
+    assert "cc-test" in c.window._profiles
+    assert "未切换" in c.window.activity.toPlainText()
+
+
+@pytest.mark.parametrize("mode", ["anthropic", "gemini"])
+def test_native_detection_discloses_single_request_and_keeps_protocol(controller, monkeypatch, mode):
+    from test_app_controller import FakeThreadPool
+    c, _, _ = controller
+    c.thread_pool = FakeThreadPool()
+    c.window.api_mode_combo.setCurrentIndex(c.window.api_mode_combo.findData(mode))
+    prompts = []
+    def question(parent, title, prompt):
+        prompts.append(prompt)
+        return app_module.QMessageBox.StandardButton.Yes
+    monkeypatch.setattr(app_module.QMessageBox, "question", question)
+    c._provider_tools("detect")
+    assert "一次" in prompts[0] and "费用" in prompts[0]
+    assert len(c.thread_pool.tasks) == 1
+    c._provider_tools_finished(c._provider_tool_token, [(mode, "你好")], "")
+    assert ("Anthropic" if mode == "anthropic" else "Gemini") in prompts[-1]
+    assert c.window.api_mode_combo.currentData() == mode
 
 
 def test_save_retains_new_key_as_dots_and_configuration_has_no_secret(controller):

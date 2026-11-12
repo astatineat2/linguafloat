@@ -39,7 +39,8 @@ def test_strict_overflow_keeps_original_and_full_translation_without_extra_page(
     policy.find(engine, paragraph, page, units, apply_layout=True)
     assert not policy.continuations and not policy.margin_references
     assert paragraph.unicode == "" and not paragraph.pdf_paragraph_composition
-    assert policy.retained_regions[0][0]["translation"] == "完整译文" * 1000
+    assert "translation" not in policy.retained_regions[0][0]
+    assert policy.retained_regions[0][0]["status"] == "untranslated"
     assert policy.retained_regions[0][0]["box"] == bounds(paragraph)
 
 
@@ -123,7 +124,8 @@ def test_mixed_pages_keep_order_geometry_and_untranslated_reporting(tmp_path, mo
     with fitz.open(source) as doc:
         doc.new_page(pno=0, width=420, height=500).insert_text((40, 40), "DIGITAL")
         doc.saveIncr()
-    def digital(job, translator, folder, emit):
+    def digital(job, translator, folder, emit, *, defer_graphics=False):
+        assert defer_graphics
         assert job.pages == "1" and not job.bilingual
         out = folder / "digital.pdf"
         with fitz.open() as doc:
@@ -177,8 +179,11 @@ def test_cache_only_missing_scan_translation_makes_zero_requests(tmp_path):
     translator = DocumentTranslator(job, "", store, JobControl(), lambda _: None,
         SimpleNamespace(responses=SimpleNamespace(create=lambda **_: pytest.fail("API called"))))
     try:
-        with fitz.open(source) as doc, pytest.raises(DocumentError, match="译文缓存不完整"):
-            translate_scan_page(doc, 0, "scan_ocr", SimpleNamespace(regions=lambda *a: [region]), "hash", translator, lambda _: None)
+        with fitz.open(source) as doc:
+            result, retained, placed = translate_scan_page(doc, 0, "scan_ocr", SimpleNamespace(regions=lambda *a: [region]), "hash", translator, lambda _: None)
+            with result:
+                assert "缓存" in retained[0]["reason"] and not placed
+                assert result[0].get_pixmap().samples == doc[0].get_pixmap().samples
         assert translator.calls == 0
     finally:
         store.close()
@@ -191,7 +196,7 @@ def test_scan_overflow_and_cancel_do_not_clear_source(tmp_path):
     with fitz.open(source) as doc:
         result, retained, placed = translate_scan_page(doc, 0, "scan_ocr", SimpleNamespace(regions=lambda *a: [region]), "", t, lambda _: None)
         with result:
-            assert retained[0]["translation"] == "长译文" * 1000 and not placed
+            assert "translation" not in retained[0] and not placed
             assert result[0].get_pixmap().samples == doc[0].get_pixmap().samples
         control.cancelled.set()
         with pytest.raises(Cancelled):
