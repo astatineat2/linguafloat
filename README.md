@@ -4,13 +4,11 @@
 
 **面向大学生、科研学习者和外服游戏玩家的 Windows 桌面翻译工具。**
 
-[下载公开稳定版](https://github.com/astatineat2/linguafloat-releases/releases/latest) · [对应源码附件](https://github.com/astatineat2/linguafloat-releases/releases) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
+[下载公开稳定版](https://github.com/astatineat2/linguafloat-releases/releases/latest)  · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
 
-## 为什么做 LinguaFloat
+## LinguaFloat是什么
 
-LinguaFloat 最初是为了玩外服游戏时，看懂屏幕上的外文对话，也能把自己想说的中文翻译成英文，方便与其他玩家交流。后来随着学习和科研需求增加，它逐步加入选中文字翻译，以及基于开源组件的 PDF、Word 和 PowerPoint 文件翻译。
-
-项目在 AI 编程辅助下持续迭代，希望把游戏交流、日常学习与文献阅读中的翻译需求，放进同一个桌面工具中，减少来回切换和重复操作。
+LinguaFloat 是一个桌面翻译工具：翻译游戏屏幕上的外文对话、把你想说的中文转成英文发出去，在任意窗口选中文本即译，以及基于开源组件翻译 PDF、Word 和 PowerPoint 文档并保留原有排版。游戏交流、日常学习和文献阅读，不必再开三个工具来回倒。
 
 ## 适合哪些场景
 
