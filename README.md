@@ -1,12 +1,6 @@
-# 浮译 LinguaFloat
-
-当前公开版本：v0.17.0，分发构建 build1。精简中文安装向导，新增单页首次服务配置；源码公开，完整安装验收仍未完成。请从[本版下载页](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.17.0-build1)手动下载；旧版签名自动更新通道暂保留 v0.11.1。详情见[发布说明](docs/public/发布说明-v0.17.0.md)。
-
-**面向大学生、科研学习者和外服游戏玩家的 Windows 桌面翻译工具。**
+# 浮译 LinguaFloat 面向大学生、科研学习者和外服游戏玩家的 Windows 桌面翻译工具。**
 
 [下载公开稳定版](https://github.com/astatineat2/linguafloat-releases/releases/latest)  · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
-
-## LinguaFloat是什么
 
 LinguaFloat 是一个桌面翻译工具：翻译游戏屏幕上的外文对话、把你想说的中文转成英文发出去，在任意窗口选中文本即译，以及基于开源组件翻译 PDF、Word 和 PowerPoint 文档并保留原有排版。游戏交流、日常学习和文献阅读，不必再开三个工具来回倒。
 
