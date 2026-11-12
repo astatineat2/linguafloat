@@ -1,4 +1,4 @@
-# 浮译 LinguaFloat **
+# 浮译 LinguaFloat 
 
 [下载公开稳定版](https://github.com/astatineat2/linguafloat-releases/releases/latest)  · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
 
