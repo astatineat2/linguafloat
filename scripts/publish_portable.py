@@ -2,6 +2,7 @@
 import argparse
 import datetime
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -37,7 +38,11 @@ if destination.exists():
     if destination.is_symlink() or destination.resolve() != destination:
         raise SystemExit("Unexpected publication destination.")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = ROOT / "build-backups" / f"before-v{__version__}-{stamp}"
+    current = (destination / "VERSION.txt").read_text(encoding="utf-8")
+    match = re.search(r"LinguaFloat v(\d+\.\d+\.\d+)", current)
+    if not match:
+        raise SystemExit("Cannot identify installed version; no files were replaced.")
+    backup = ROOT / "build-backups" / f"before-v{match[1]}-{stamp}"
     backup.parent.mkdir(parents=True, exist_ok=True)
     destination.rename(backup)
     print(f"Previous complete bundle retained: {backup}")

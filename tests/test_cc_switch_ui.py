@@ -89,12 +89,13 @@ def test_manual_selection_read_error_and_cancel(application, monkeypatch, tmp_pa
     assert dialog.result() == QDialog.DialogCode.Rejected
 
 
-def test_main_window_import_entry_emits_without_network(application):
+def test_main_window_sql_import_entry_emits_without_network(application):
     window = MainWindow(AppSettings(), "missing")
     calls = []
-    window.dashboard.local_requested.connect(calls.append)
-    button = next(b for b in window.findChildren(QPushButton) if b.text() == "从本机 CC Switch 读取")
-    button.click()
-    assert calls == ["cc"]
+    window.import_sql_requested.connect(lambda: calls.append("sql"))
+    window.dashboard.show_data()
+    window.dashboard.sql_button.click()
+    assert calls == ["sql"]
+    assert not hasattr(window.dashboard, "local_requested")
     window.allow_close()
     window.close()

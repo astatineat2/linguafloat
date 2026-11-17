@@ -53,7 +53,9 @@ Responses、Chat Completions、Anthropic Messages 或 Gemini generateContent。�
 <b>区域翻译：</b>选择屏幕区域，本地 OCR 后发送文字翻译；可暂停、继续、移动和缩放。
 游戏模式仅保留区域翻译。<br>
 <b>文件翻译：</b>添加 PDF、Word 或 PPTX，选择输出目录和输出选项，再开始。
-文件翻译跟随当前供应商及模型；已启动任务保留原配置快照。</p>
+文件翻译跟随当前供应商及模型；已启动任务保留原配置快照。
+保留版式 PDF 的独立表格随正文默认翻译；图内文字保留原文，正文完成后从底部“图片翻译”按需补译。
+图片结果编号另存，不覆盖正文或旧结果。旧任务未译表格不会因图片补译而自动处理。</p>
 <h3>3 · PDF 与 OCR 资源</h3>
 <p>屏幕 OCR 模型随完整包提供。首次 PDF 处理可能需要联网下载缺失的布局模型、字体等资源，
 具体大小取决于本机缺失项。资源下载与翻译 API 计费是两件事；下载资源本身不调用翻译模型。
@@ -77,7 +79,14 @@ API Key 使用 Windows 凭据管理器或指定的环境变量，不放进软件
 """
 
 
+class UpdateStatusLabel(QLabel):
+    def setText(self, text):
+        super().setText(text)
+        self.setVisible(bool(text))
+
+
 class HelpDialog(AppDialog):
+    header_close_visible = False
     check_requested = Signal()
     download_requested = Signal()
     install_requested = Signal()
@@ -102,9 +111,10 @@ class HelpDialog(AppDialog):
         self.auto_check.setChecked(settings.update_auto_check)
         self.auto_check.toggled.connect(self.auto_changed)
         body.addWidget(self.auto_check)
-        self.status = QLabel("可手动检查公开稳定版；不会上传文档或 API Key。")
+        self.status = UpdateStatusLabel("")
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
+        self.status.hide()
         body.addWidget(self.status)
         self.notes = QTextBrowser()
         self.notes.setOpenExternalLinks(False)

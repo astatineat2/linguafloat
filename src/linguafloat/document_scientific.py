@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 def normalize_formula_baseline(formula, size):
     """Anchor inline formulas to their own full-size glyphs, not another line."""
+    if getattr(formula, "_lf_caption_marker", False):
+        return
     if not formula.box or not size or formula.box.y2 - formula.box.y > size * 1.6:
         return
     bases = [c.box.y for c in formula.pdf_character
@@ -116,8 +118,6 @@ def protect_math(paragraph, fonts):
     from babeldoc.format.pdf.document_il import Box, PdfFormula, PdfParagraphComposition
     compositions = paragraph.pdf_paragraph_composition
     chars = [c for part in compositions if not part.pdf_formula for c in composition_chars(part)]
-    if not chars:
-        return 0
     all_chars = [c for part in compositions for c in composition_chars(part)]
     # Existing formula runs may own the subscript and its trailing space.
     # Removing them would turn 'RuO' + '2 ' + 'film' into 'RuOfilm'.
@@ -126,13 +126,26 @@ def protect_math(paragraph, fonts):
     cursor = 0
     for c in chars:
         token = c.char_unicode or ""
-        name = fonts.get(c.pdf_style.font_id, "") if c.pdf_style else ""
-        if re.search(r"mth|math|symbol|cmex|cmsy|advp4c", name, re.I) or re.search(r"[α-ωΑ-Ω∑∫√≤≥±×÷₀-₉⁰-⁹]", token):
+        name = fonts.get((c.xobj_id, c.pdf_style.font_id),
+                         fonts.get(c.pdf_style.font_id, "")) if c.pdf_style else ""
+        if re.search(r"mth|math|symbol|cmex|cmsy|advp4c", name, re.I) or re.search(r"[α-ωΑ-Ω∑∫√≤≥±×÷⋉⋊₀-₉⁰-⁹]", token):
             protected.add(id(c))
         cursor += len(token)
     # Element symbols, numerical powers and small baseline-shifted characters
     # must survive model translation with their original case and geometry.
     spans = list(re.finditer(r"\b(?:tCo|tTb|Ta|Pt|Co|Tb|Al|SiO\d*|Fe|Ni|RuO\d*)\b|[\ufb00-\ufb06]{3,}", text))
+    # Recognize stoichiometric words, including a script *between* elements
+    # (Mn3Sn), before separating pre-existing formula compositions. Validate
+    # element symbols so ordinary labels such as Figure2 do not become math.
+    elements = set("H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn "
+                   "Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La "
+                   "Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi "
+                   "Po At Rn Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt "
+                   "Ds Rg Cn Nh Fl Mc Lv Ts Og".split())
+    for match in re.finditer(r"\b(?:[A-Z][a-z]?[0-9₀-₉]*)+\b", text):
+        if re.search(r"[0-9₀-₉]", match[0]) and all(
+                symbol in elements for symbol in re.findall(r"[A-Z][a-z]?", match[0])):
+            spans.append(match)
     cursor = 0
     for c in all_chars:
         length = len(c.char_unicode or "")
@@ -145,6 +158,9 @@ def protect_math(paragraph, fonts):
             protected.add(id(c))
     if not protected:
         paragraph.pdf_paragraph_composition = merge_formula_runs(compositions, base_size)
+        for part in paragraph.pdf_paragraph_composition:
+            if part.pdf_formula:
+                normalize_formula_baseline(part.pdf_formula, base_size)
         return 0
     result = []
     count = 0
@@ -292,8 +308,27 @@ def repair_cached_chemical_scripts(page, source_words, source_characters=()):
 def merge_formula_runs(parts, size):
     """Keep adjacent equation pieces together across font/style boundaries."""
     from babeldoc.format.pdf.document_il import Box, PdfFormula, PdfParagraphComposition
-    if not size:
+    if not size or not any(p.pdf_formula for p in parts):
         return parts
+    for part in parts:
+        formula = part.pdf_formula
+        if not formula or getattr(formula, "_lf_caption_marker", False):
+            continue
+        # Parser formula boxes may omit late-painted scripts. Expand from
+        # original glyphs, never from guessed Unicode or a replacement font.
+        boxes = [formula.box] if formula.box else []
+        for char in formula.pdf_character:
+            if char.box:
+                boxes.append(char.box)
+            if char.visual_bbox and char.visual_bbox.box:
+                boxes.append(char.visual_bbox.box)
+        boxes.extend(item.box for item in [*formula.pdf_curve, *formula.pdf_form] if item.box)
+        if boxes:
+            box = Box(min(b.x for b in boxes), min(b.y for b in boxes),
+                      max(b.x2 for b in boxes), max(b.y2 for b in boxes))
+            if formula.box:
+                formula.y_offset = (formula.y_offset or 0) + box.y - formula.box.y
+            formula.box = box
     if any(p.pdf_formula for p in parts):
         # Native parser lines can still contain the equation's base characters.
         # Expose their original glyphs to the existing word/geometry guards so
@@ -301,17 +336,52 @@ def merge_formula_runs(parts, size):
         parts = [child for part in parts for child in (
             [PdfParagraphComposition(pdf_character=c) for c in composition_chars(part)]
             if not part.pdf_formula and composition_chars(part) else [part])]
-    text = "".join((p.pdf_character.char_unicode or "") if p.pdf_character else "\ufffc" for p in parts)
     blocked = set()
-    offsets, offset = [], 0
+    offsets, offset, tokens, previous = [], 0, [], None
     for part in parts:
+        char = part.pdf_character
+        # Text runs can be painted in a different order from the expression.
+        # Do not mistake spatially separated identifiers for a prose word.
+        if previous and char and previous.box and char.box and (
+                abs(previous.box.y-char.box.y) > size*.35
+                or char.box.x-previous.box.x2 > size*.35
+                or char.box.x < previous.box.x):
+            tokens.append("\ufffc")
+            offset += 1
         token = part.pdf_character.char_unicode or "" if part.pdf_character else "\ufffc"
         offsets.append((offset, offset + len(token)))
+        tokens.append(token)
         offset += len(token)
+        previous = char
+    text = "".join(tokens)
     for match in re.finditer(r"[A-Za-z]+", text):
-        if len(match[0]) >= 2 and match[0] not in {"nm", "mm", "cm", "ns", "ms", "sin", "cos", "exp", "ln"}:
+        # Uppercase mathematical operators applied to an argument (SO(2),
+        # SU(n), O(n), ...) may straddle already protected argument glyphs.
+        # Merely being uppercase is insufficient: prose acronyms stay text.
+        operator = (match[0].isupper() and len(match[0]) <= 3
+                    and text[match.end():].lstrip().startswith(("(", "[", "{")))
+        if len(match[0]) >= 2 and not operator and match[0] not in {"nm", "mm", "cm", "ns", "ms", "sin", "cos", "exp", "ln"}:
             blocked.update(i for i, (a, b) in enumerate(offsets) if a < match.end() and b > match.start())
-    chosen = {i for i, p in enumerate(parts) if p.pdf_formula}
+    # Sentence punctuation and single-letter prose labels are boundaries, not
+    # evidence of a mathematical attachment (e.g. a citation followed by d,).
+    for match in re.finditer(r"[.,;:!?]|(?<![A-Za-z])[A-Za-z](?=\s*,)", text):
+        blocked.update(i for i, (a, b) in enumerate(offsets) if a < match.end() and b > match.start())
+    for i, part in enumerate(parts):
+        f = part.pdf_formula
+        if not f:
+            continue
+        if getattr(f, "_lf_caption_marker", False):
+            blocked.add(i)
+        else:
+            # Runtime markers do not survive every cache format, and the late
+            # rule-attachment pass has no font map. Conservatively leave a
+            # baseline single letter followed by prose punctuation independent.
+            chars = [c for c in f.pdf_character if (c.char_unicode or "").strip()]
+            following = "".join(c.char_unicode or "" for p in parts[i+1:i+4] for c in composition_chars(p)).lstrip()
+            if (len(chars) == 1 and re.fullmatch(r"[a-z]", chars[0].char_unicode or "")
+                    and chars[0].pdf_style and (chars[0].pdf_style.font_size or 0) >= size*.85
+                    and following.startswith((",", ".", ";", ":"))):
+                blocked.add(i)
     def bounds(part):
         if part.pdf_formula:
             return part.pdf_formula.box
@@ -322,45 +392,73 @@ def merge_formula_runs(parts, size):
             return False
         return (b.x2 >= a.x - size * .65 and b.x <= a.x2 + size * .65
                 and min(a.y2, b.y2) >= max(a.y, b.y) - size * .3)
-    changed = True
-    while changed:
-        changed = False
-        for i, part in enumerate(parts):
-            if i in chosen or i in blocked or not part.pdf_character:
-                continue
-            if ((i-1 in chosen and adjacent(bounds(parts[i-1]), bounds(part))) or
-                    (i+1 in chosen and adjacent(bounds(part), bounds(parts[i+1])))):
-                chosen.add(i)
-                changed = True
-    result, group = [], []
-    def flush():
-        if not group:
-            return
+    def combine(group):
         if len(group) == 1 and group[0].pdf_formula:
-            result.append(group[0])
-            return
+            return group[0]
         boxes = [bounds(p) for p in group]
         original = [p.pdf_formula for p in group if p.pdf_formula]
         anchor = original[0]
         box = Box(min(b.x for b in boxes), min(b.y for b in boxes), max(b.x2 for b in boxes), max(b.y2 for b in boxes))
-        result.append(PdfParagraphComposition(pdf_formula=PdfFormula(
-            box=box, pdf_character=[c for p in group for c in composition_chars(p)],
+        chars = [c for p in group for c in composition_chars(p)]
+        # Preserve original PDF paint order when supplied by the parser. Never
+        # sort glyphs by x/y: nested scripts and overprints are not linear text.
+        ordered = iter(sorted((c for c in chars if c.render_order is not None),
+                              key=lambda c: (c.render_order, c.sub_render_order or 0)))
+        # Inferred spaces have no paint order. Leave their slots intact while
+        # restoring the relative paint order of every original glyph.
+        chars = [next(ordered) if c.render_order is not None else c for c in chars]
+        return PdfParagraphComposition(pdf_formula=PdfFormula(
+            box=box, pdf_character=chars,
             pdf_curve=[c for f in original for c in f.pdf_curve],
             pdf_form=[f for formula in original for f in formula.pdf_form],
-            x_offset=0, y_offset=box.y-anchor.box.y+(anchor.y_offset or 0), x_advance=0)))
+            x_offset=0, y_offset=box.y-anchor.box.y+(anchor.y_offset or 0), x_advance=0))
+
+    def compatible(indices):
+        group = [parts[i] for i in indices]
+        chars = [c for p in group for c in composition_chars(p)]
+        if any(c.vertical for c in chars) or len({c.xobj_id for c in chars if c.xobj_id is not None}) > 1:
+            return False
+        graphic = any(p.pdf_formula and (p.pdf_formula.pdf_curve or p.pdf_formula.pdf_form) for p in group)
+        bases = [c.box.y for c in chars if c.box and c.pdf_style and
+                 (c.char_unicode or "").strip() and (c.pdf_style.font_size or 0) >= size*.85]
+        if bases and max(bases)-min(bases) > size*.4:
+            # Existing stacked/ruled formulas retain the old formula-to-formula
+            # path, but must not acquire ordinary text from the next line.
+            return graphic and all(p.pdf_formula for p in group)
+        return True
+
+    result, run = [], []
+    def flush_run():
+        if not run:
+            return
+        # Connected spatial components inside a prose-delimited run. Membership
+        # is independent of parser composition order, including late scripts.
+        components = [{i} for i in run]
+        for a, i in enumerate(run):
+            for j in run[a+1:]:
+                if not adjacent(bounds(parts[i]), bounds(parts[j])):
+                    continue
+                left = next(g for g in components if i in g)
+                right = next(g for g in components if j in g)
+                if left is right or not compatible(left | right):
+                    continue
+                left.update(right)
+                components.remove(right)
+        owners = {i:g for g in components for i in g}
+        for i in run:
+            group = owners[i]
+            if not any(parts[j].pdf_formula for j in group):
+                result.append(parts[i])
+            elif i == min(group):
+                result.append(combine([parts[j] for j in sorted(group)]))
     for i, part in enumerate(parts):
-        if i in chosen:
-            boxes = [bounds(p) for p in group]
-            box = Box(min(b.x for b in boxes), min(b.y for b in boxes), max(b.x2 for b in boxes), max(b.y2 for b in boxes)) if boxes else None
-            if group and not adjacent(box, bounds(part)):
-                flush()
-                group = []
-            group.append(part)
-        else:
-            flush()
-            group = []
+        if i in blocked or bounds(part) is None:
+            flush_run()
+            run = []
             result.append(part)
-    flush()
+        else:
+            run.append(i)
+    flush_run()
     return result
 
 
@@ -371,7 +469,26 @@ def check_formula_tokens(translate_input, output):
         return True
     pattern = re.compile("|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True)))
     unknown = set(re.findall(r"\{[vV]\d+\}", output)) - set(re.findall(r"\{[vV]\d+\}", translate_input.unicode))
-    return not unknown and pattern.findall(output) == pattern.findall(translate_input.unicode)
+    if unknown or pattern.findall(output) != pattern.findall(translate_input.unicode):
+        return False
+    # A formula slot can contain only the fractional digits/unit. Keep the
+    # adjacent decimal prefix attached, even when a style closes in between.
+    def decimal_edges(text):
+        text = re.sub(r'<[^>]+>', '', text)
+        return [(m.group(), prefix.group(0) if (prefix := re.search(
+            r'(?<![A-Za-z0-9_.])[-+\u2212]?\d+\.$', text[:m.start()])) else None)
+            for m in pattern.finditer(text)]
+    return decimal_edges(translate_input.unicode) == decimal_edges(output)
+
+
+def prose_numbers(text):
+    """Numbers outside immutable tags/formula slots, including integer values."""
+    from collections import Counter
+    from decimal import Decimal
+    text = re.sub(r'\{[vV]\d+\}', ' ', re.sub(r'<[^>]+>', '', text))
+    pattern = r'(?<![0-9_.+\u2212-])[-+\u2212]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?:\s*[%\uff05])?'
+    return Counter((Decimal(m[0].replace('\u2212', '-').rstrip('%\uff05').strip()),
+                    m[0].endswith(('%', '\uff05'))) for m in re.finditer(pattern, text))
 
 
 def _formula_fragment_problem(source, text, tokens):
@@ -381,11 +498,14 @@ def _formula_fragment_problem(source, text, tokens):
         return "片段返回空译文"
     if any(token in text for token in tokens) or re.search(r"\{[vV]\d+\}", text):
         return "片段夹带公式标记"
-    if re.findall(r"<[^>]+>", source) != re.findall(r"<[^>]+>", text):
-        return "片段格式标签丢失、增加或顺序变化"
+    from linguafloat.document_richtext import style_structure_matches
+    if not style_structure_matches(source, text, fragments=True):
+        return "片段格式标签丢失、增加或嵌套关系变化"
     from linguafloat.document_context import scientific_quantities
     if scientific_quantities(source) != scientific_quantities(text):
         return "片段小数、百分比或数量级发生变化"
+    if prose_numbers(source) != prose_numbers(text):
+        return "片段正文数值发生变化"
     return ""
 
 
@@ -411,20 +531,20 @@ def translate_formula_segments(translate_input, translator):
     from babeldoc.format.pdf.document_il.midend.il_translator import FormulaPlaceholder
     from linguafloat.document_core import DocumentError
     tokens = [p.placeholder for p in translate_input.placeholders if isinstance(p, FormulaPlaceholder)]
-    if not tokens:
-        return translate_input.unicode
-    pattern = "(" + "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True)) + ")"
-    pieces = re.split(pattern, translate_input.unicode)
+    pattern = "(" + "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True)) + ")" if tokens else None
+    pieces = re.split(pattern, translate_input.unicode) if pattern else [translate_input.unicode]
     fragments = [dict(id=i, input=text) for i, text in enumerate(pieces)
                  if i % 2 == 0 and re.search(r"[A-Za-z]{2,}|[\u3400-\u9fff]", re.sub(r"<[^>]+>", "", text))]
     if not fragments:
         return translate_input.unicode
     messages = translator.messages("")
     messages[0]["content"] += (
-        " Formula-segment repair v1. Return a JSON array of {id, output} objects, one for every fragment."
+        " Formula-segment repair v2. Return a JSON array of {id, output} objects, one for every fragment."
         " Translate each fragment independently using the context only to resolve meaning."
         " Never move words between fragments. Do not output any formula placeholders."
-        " Preserve all style tags exactly; fragments may begin or end with incomplete sentences."
+        " Preserve all style tags exactly, including their nesting and scope; never merge or remove spans."
+        " Preserve numbers exactly, including a trailing decimal point next to a protected formula."
+        " Fragments may begin or end with incomplete sentences."
         " Do not translate or output context. Do not add explanations or Markdown fences.")
     messages[1]["content"] = json.dumps(dict(fragments=fragments, context=translate_input.unicode), ensure_ascii=False)
     # Content recovery shares the transport retry budget: malformed responses
@@ -542,7 +662,7 @@ class ScientificLayout:
             height, entries = self.references.get(page.page_number, (0, []))
             fonts = {f.font_id: f.name or "" for f in page.pdf_font}
             for obj in page.pdf_xobject:
-                fonts.update({f.font_id: f.name or "" for f in obj.pdf_font})
+                fonts.update({(obj.xobj_id, f.font_id): f.name or "" for f in obj.pdf_font})
             # Replace only fully assigned source characters. Unassigned content
             # stays in its original paragraph; references never absorb a heading.
             for entry in entries:

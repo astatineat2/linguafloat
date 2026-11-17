@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import uuid
+from collections import deque
 from email.utils import parsedate_to_datetime
 
 
@@ -41,39 +42,71 @@ class RequestGate:
         self.lock = threading.RLock()
         self.inflight = self.successes = 0
         self.cooldown = 0.0
+        self.pending = deque()
+        self.error = None
         with store.lock, store.db:
             store.db.execute("CREATE TABLE IF NOT EXISTS request_quota (id TEXT PRIMARY KEY, scope TEXT, started REAL, tokens INTEGER)")
             store.db.execute("CREATE INDEX IF NOT EXISTS request_quota_scope ON request_quota(scope, started)")
 
-    def acquire(self, messages):
+    def acquire(self, messages, on_wait=None):
         # Conservative byte-based input/output reservation; actual usage reconciles it.
         size = len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
         tokens = size + max(size, 4096)
         if self.tpm and tokens > self.tpm:
             from linguafloat.document_core import DocumentError
             raise DocumentError("单次请求的保守 Token 预留超过文档 TPM 限额；请核实服务商限额后调整，或使用较小的翻译分块。未发送该请求。")
-        while True:
-            self.control.checkpoint()
-            with self.lock:
-                delay = max(0, self.cooldown - time.monotonic())
-                if self.inflight >= self.limit:
-                    delay = max(delay, .05)
-                if delay == 0:
-                    with self.store.lock, self.store.db:
-                        self.store.db.execute("BEGIN IMMEDIATE")
-                        now = time.time()
-                        self.store.db.execute("DELETE FROM request_quota WHERE started <= ?", (now - 60,))
-                        rows = self.store.db.execute("SELECT started,tokens FROM request_quota WHERE scope=? ORDER BY started", (self.scope,)).fetchall()
-                        if rows:
-                            delay = max(0, rows[-1][0] + max(1, 60 / self.rpm) - now)
-                            if len(rows) >= self.rpm or self.tpm and sum(r[1] for r in rows) + tokens > self.tpm:
-                                delay = max(delay, rows[0][0] + 60 - now)
-                        if delay == 0:
-                            identity = uuid.uuid4().hex
-                            self.store.db.execute("INSERT INTO request_quota VALUES (?,?,?,?)", (identity, self.scope, now, tokens))
+        ticket = object()
+        with self.lock:
+            self.pending.append(ticket)
+        try:
+            while True:
+                self.control.checkpoint(lambda: self.error)
+                reason = "等待并发名额"
+                with self.lock:
+                    if self.error is not None:
+                        raise self.error
+                    delay = max(0, self.cooldown - time.monotonic())
+                    if delay:
+                        reason = "等待限流冷却"
+                    if self.pending[0] is not ticket or self.inflight >= self.limit:
+                        delay = max(delay, .05)
+                    if delay == 0:
+                        reason = "等待 RPM / TPM 额度"
+                        identity, delay = self._reserve(tokens)
+                        if identity:
+                            self.pending.popleft()
                             self.inflight += 1
                             return identity
-            self.wait(min(.1, max(.01, delay)))
+                if on_wait:
+                    on_wait(reason)
+                self.wait(min(.1, max(.01, delay)))
+        finally:
+            with self.lock:
+                if ticket in self.pending:
+                    self.pending.remove(ticket)
+
+    def _reserve(self, tokens):
+        """Called under the gate lock; persistent quotas also cover worker restarts."""
+        delay = 0
+        with self.store.lock, self.store.db:
+            self.store.db.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            self.store.db.execute("DELETE FROM request_quota WHERE started <= ?", (now - 60,))
+            rows = self.store.db.execute("SELECT started,tokens FROM request_quota WHERE scope=? ORDER BY started", (self.scope,)).fetchall()
+            if rows:
+                delay = max(0, rows[-1][0] + max(1, 60 / self.rpm) - now)
+                if len(rows) >= self.rpm or self.tpm and sum(r[1] for r in rows) + tokens > self.tpm:
+                    delay = max(delay, rows[0][0] + 60 - now)
+            if delay == 0:
+                identity = uuid.uuid4().hex
+                self.store.db.execute("INSERT INTO request_quota VALUES (?,?,?,?)", (identity, self.scope, now, tokens))
+                return identity, 0
+        return None, delay
+
+    def stop(self, error):
+        with self.lock:
+            if self.error is None:
+                self.error = error
 
     def release(self, identity, actual=None):
         with self.lock:
@@ -82,10 +115,14 @@ class RequestGate:
                 with self.store.lock, self.store.db:
                     self.store.db.execute("UPDATE request_quota SET tokens=? WHERE id=?", (actual, identity))
 
-    def backoff(self, seconds):
+    def backoff(self, seconds, *, rate_limited=True):
         with self.lock:
-            self.cooldown = max(self.cooldown, time.monotonic() + seconds)
-            self.limit = 1
+            if rate_limited:
+                self.cooldown = max(self.cooldown, time.monotonic() + seconds)
+                self.limit = 1
+            else:
+                # A single slow connection is not proof that every request is rate limited.
+                self.limit = max(1, self.limit - 1)
             self.successes = 0
 
     def success(self):

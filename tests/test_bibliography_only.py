@@ -51,6 +51,22 @@ def test_references_end_on_same_page_preserve_original_pixels(local_layout):
         assert "Translated appendix" in target.get_text()
 
 
+def test_reference_clip_does_not_duplicate_a_footer_glyph():
+    # A column's rectangular tail may cross a centred running page number.
+    with fitz.open() as source, fitz.open() as rendered:
+        page = source.new_page(width=600, height=800)
+        page.insert_text((295, 770), "7588", fontsize=7.5)
+        page.insert_text((320, 300), "[1] Native reference")
+        rendered.insert_pdf(source)
+        glyphs = page.get_text("rawdict")["blocks"][0]["lines"][0]["spans"][0]["chars"]
+        box = fitz.Rect(glyphs[2]["bbox"])
+        split = (box.x0 + box.x1) / 2
+        retain_pdf_tail(rendered[0], page, dict(boxes=[[split, 250, 600, 800]]))
+        footer = fitz.Rect(290, 755, 320, 780)
+        assert rendered[0].get_text(clip=footer).strip() == "7588"
+        assert rendered[0].get_pixmap(matrix=fitz.Matrix(4,4), clip=footer).samples == page.get_pixmap(matrix=fitz.Matrix(4,4), clip=footer).samples
+
+
 def test_unknown_column_conflict_retains_only_uncertain_page(local_layout):
     with fitz.open() as doc:
         page = doc.new_page()

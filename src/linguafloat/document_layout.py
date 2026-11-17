@@ -82,8 +82,13 @@ class LayoutPolicy:
         self.font_counter = 0
         self._saved = {}
         self.source_words = {}
+        self.source_lines = {}
         self.source_characters = {}
         self.source_subscripts = {}
+        self.source_structures = {}
+        self.source_identifier_links = {}
+        self.source_date_rows = {}
+        self.source_page_sizes = {}
         self.frontmatter = {}
         self.graphic_regions = {}
         self.before_layout = None
@@ -108,12 +113,26 @@ class LayoutPolicy:
                     if page.rotation or page.cropbox.x0 or page.cropbox.y0:
                         continue
                     height = page.rect.height
+                    from linguafloat.document_structure import source_structure
+                    self.source_structures[number] = source_structure(page)
+                    from linguafloat.document_publication import split_identifier_links
+                    self.source_identifier_links[number] = split_identifier_links(page)
+                    from linguafloat.document_publication import date_rows
+                    self.source_date_rows[number] = date_rows(page)
+                    self.source_page_sizes[number] = (page.rect.width,page.rect.height)
+                    for region in self.source_structures[number]['preserve']:
+                        x0,y0,x1,y1=region['box']
+                        self.retained_regions[number].append(dict(box=[x0,height-y1,x1,height-y0],
+                            kind='graphic_source', preserve_reason=region['kind']))
                     from linguafloat.document_frontmatter import plan_frontmatter
                     self.frontmatter[number] = plan_frontmatter(page)
                     self.source_words[number] = [(w[4], (w[0], height - w[3], w[2], height - w[1]))
                                                   for w in page.get_text("words")]
-                    spans = [s for block in page.get_text("dict", flags=pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES)["blocks"]
-                             if "lines" in block for line in block["lines"] for s in line["spans"]]
+                    lines = [line for block in page.get_text("dict", flags=pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES)["blocks"]
+                             for line in block.get("lines", [])]
+                    self.source_lines[number] = [(r[0], height-r[3], r[2], height-r[1])
+                                                 for line in lines for r in [line["bbox"]]]
+                    spans = [s for line in lines for s in line["spans"]]
                     candidates = []
                     for span in spans:
                         if span["size"] >= 8 or not re.fullmatch(r"[A-Za-z0-9]{1,12}", span["text"]):
@@ -156,6 +175,28 @@ class LayoutPolicy:
         if id(page) in self.prepared:
             return
         self.prepared.add(id(page))
+        from linguafloat.document_publication import suppress_date_paragraphs
+        removed_dates=suppress_date_paragraphs(page,
+            self.source_date_rows.get(page.page_number,[]),
+            self.source_page_sizes.get(page.page_number,(0,0)))
+        if removed_dates:
+            self.geometry_repairs.append(dict(page=page.page_number+1,
+                                              kind='publication_date_group',runs=removed_dates))
+        from linguafloat.document_publication import prune_split_identifier_suffixes
+        pruned=prune_split_identifier_suffixes(page,self.source_identifier_links.get(page.page_number,[]))
+        if pruned:
+            self.geometry_repairs.append(dict(page=page.page_number+1,
+                                              kind='source_identifier_suffixes',runs=pruned))
+        from linguafloat.document_richtext import restore_cached_caption_markers
+        restore_cached_caption_markers(page)
+        from linguafloat.document_richtext import protect_author_identities
+        protect_author_identities(page, self.source_structures.get(page.page_number, {}), cached=True)
+        from linguafloat.document_structure import normalize_cjk_runs
+        from linguafloat.document_richtext import normalize_prose_spaces
+        for paragraph in page.pdf_paragraph:
+            changed = normalize_cjk_runs(paragraph) + normalize_prose_spaces(paragraph)
+            if changed:
+                self.geometry_repairs.append(dict(page=page.page_number+1, kind='cjk_boundary_spaces', runs=changed))
         page.pdf_paragraph[:] = [p for p in page.pdf_paragraph if id(p) not in self.failed_paragraphs]
         self.exclude_frontmatter(page)
         from babeldoc.format.pdf.document_il import Box
@@ -209,10 +250,19 @@ class LayoutPolicy:
 
     def exclude_frontmatter(self,page):
         from linguafloat.document_frontmatter import paragraph_in_plan
-        plans=self.frontmatter.get(page.page_number,[])+self.graphic_regions.get(page.page_number,[])
-        if not plans:return
+        # Figures were filtered glyph-by-glyph before translation. Reapplying
+        # the old paragraph-area threshold could delete captions on both sides
+        # of a figure whose enclosing rectangle overlaps it.
+        plans=self.frontmatter.get(page.page_number,[])
         height=page.cropbox.box.y2-page.cropbox.box.y
         page.pdf_paragraph[:]=[p for p in page.pdf_paragraph if not paragraph_in_plan(p,height,plans)]
+        # Unicode-only engine fallbacks may have no source glyph list. Only
+        # wholly contained paragraphs can safely be excluded by rectangle.
+        figures = self.graphic_regions.get(page.page_number, [])
+        page.pdf_paragraph[:] = [p for p in page.pdf_paragraph if not (p.box and any(
+            r['box'][0] <= p.box.x and p.box.x2 <= r['box'][2]
+            and r['box'][1] <= height-p.box.y2 and height-p.box.y <= r['box'][3]
+            for r in figures))]
 
     def remove_title_remnants(self, page):
         titles = [p for p in page.pdf_paragraph if p.layout_label == "title" and p.box
@@ -323,7 +373,11 @@ class LayoutPolicy:
                 candidate = Box(original.x, original.y, max(b.x2 for b in neighbors), original.y2)
                 if not any(intersection(bounds(candidate), o) > intersection(bounds(original), o)+.01 for o in obstacles):
                     boxes.extend(expanded_boxes(candidate, obstacles, bounds(page.cropbox)))
-        spacings = (1.3, 1.2)
+        # Some publisher columns leave a 30pt slot for three 9pt lines. The
+        # previous 1.2 minimum forced these short paragraphs down to 6pt.
+        # Try readable native size with a modest 1.1 leading first; the ink
+        # and neighbor checks below still veto actual line collisions.
+        spacings = (1.3, 1.2, 1.1) if paragraph.layout_label == 'plain text' else (1.3, 1.2)
         for scale in font_scales(size):
             self.control.checkpoint()
             for box in boxes:
@@ -342,7 +396,9 @@ class LayoutPolicy:
                     if apply_layout:
                         self.apply(engine, paragraph, page, placed, box, scale)
                         self.records.append(dict(page=page.page_number + 1, text=paragraph.unicode,
-                                                 size=size * scale, spacing=spacing, box=bounds(box),
+                                                 size=size * scale, original_size=size,
+                                                 adjustment_reason='原区域安全排版需要局部缩小' if scale < 1 else '',
+                                                 spacing=spacing, box=bounds(box),
                                                  expanded=bounds(box) != bounds(original)))
                     return scale, placed if apply_layout else None
         if not apply_layout:
@@ -357,6 +413,10 @@ class LayoutPolicy:
             box = bounds(unit)
             if not box:
                 return False
+            face = getattr(unit, "font", None)
+            if getattr(unit, "unicode", None) and callable(getattr(face, "ink_padding", None)):
+                left, top, right, bottom = face.ink_padding(unit.font_size)
+                box = (box[0]-left, box[1]-bottom, box[2]+right, box[3]+top)
             if box[0] < page_box[0] - .5 or box[1] < page_box[1] - .5 or box[2] > page_box[2] + .5 or box[3] > page_box[3] + .5:
                 return False
             if any(intersection(box, other) > max(.5, intersection(original, other)) for other in obstacles):
@@ -579,6 +639,7 @@ class LayoutPolicy:
                            translate=ILTranslator.translate, translate_llm=ILTranslatorLLMOnly.translate,
                            paragraph=ILTranslator.translate_paragraph, batch=ILTranslatorLLMOnly.translate_paragraph,
                            pre_translate=ILTranslator.pre_translate_paragraph,
+                           translate_input=ILTranslator.get_translate_input,
                            typeset_paragraph=Typesetting.render_paragraph,
                            post_translate=ILTranslator.post_translate_paragraph,
                            passthrough_copy=LazyPassthroughInstruction.__dict__.get("__deepcopy__"))
@@ -632,6 +693,15 @@ class LayoutPolicy:
                     if part.pdf_character else part
                     for part in paragraph.pdf_paragraph_composition]
             units = policy._saved["units"](engine, adapted, fonts)
+            for unit in units:
+                f = unit.formular
+                if f and (f.is_corner_mark or (f.y_offset or 0) > size*.15):
+                    text = ''.join(c.char_unicode or '' for c in f.pdf_character).strip()
+                    small = all(c.pdf_style and (c.pdf_style.font_size or size) < size*.85 for c in f.pdf_character)
+                    if small and re.fullmatch(r'\d+(?:\s*[,–−-]\s*\d+)*', text):
+                        # Citation superscripts attach to prose, without the
+                        # engine's CJK/non-CJK quarter-em gap on either side.
+                        unit.mixed_character_blacklist_cache = True
             expected = "".join(c.pdf_same_style_unicode_characters.unicode or ""
                                for c in paragraph.pdf_paragraph_composition if c.pdf_same_style_unicode_characters).replace("\n", "")
             actual = "".join(u.unicode for u in units if u.unicode)
@@ -652,11 +722,20 @@ class LayoutPolicy:
 
         def translated(engine, docs, method):
             for page in docs.page:
+                from linguafloat.document_geometry import split_source_columns, exclude_graphic_glyphs
+                policy.geometry_repairs.extend(split_source_columns(page, policy.source_lines.get(page.page_number, [])))
+                from linguafloat.document_structure import split_structures
+                structure = policy.source_structures.get(page.page_number, dict(headings=[], authors=[], preserve=[]))
+                policy.geometry_repairs.extend(dict(page=page.page_number+1, **c) for c in split_structures(page, structure))
+                exclude_graphic_glyphs(page, policy.graphic_regions.get(page.page_number, []))
+                exclude_graphic_glyphs(page, [r for r in structure['preserve'] if r['kind']=='identifier'])
                 policy.exclude_frontmatter(page)
                 from linguafloat.document_references import filter_layout_paragraphs
                 for paragraph in page.pdf_paragraph:
                     policy.paragraph_pages[id(paragraph)] = page
                 filter_layout_paragraphs(page, policy.reference_boundary, policy.retain_error)
+                from linguafloat.document_geometry import attach_detached_citations
+                policy.geometry_repairs.extend(dict(page=page.page_number+1, **c) for c in attach_detached_citations(page))
                 for index, paragraph in enumerate(page.pdf_paragraph):
                     locations[id(paragraph)] = f"原始第 {page.page_number + 1} 页 · 段落 {index + 1}"
             translator = policy.scientific.translator if policy.scientific else None
@@ -670,8 +749,16 @@ class LayoutPolicy:
                             section = paragraph.unicode or ""
                         blocks.append(SourceBlock(paragraph.unicode or "", role, section))
                 translator.set_source_context(blocks)
+            from linguafloat.document_richtext import remember_caption_markers, restore_source_styles
+            caption_markers = {id(page): remember_caption_markers(page) for page in docs.page}
             if policy.scientific:
                 policy.scientific.prepare(docs)
+            for page in docs.page:
+                restore_source_styles(page, caption_markers[id(page)])
+                from linguafloat.document_richtext import protect_author_identities
+                count = protect_author_identities(page, policy.source_structures.get(page.page_number, {}))
+                if count:
+                    policy.geometry_repairs.append(dict(page=page.page_number+1, kind='author_identity_anchors', count=count))
             for page in docs.page:
                 for index, paragraph in enumerate(page.pdf_paragraph):
                     policy.paragraph_pages[id(paragraph)] = page
@@ -722,7 +809,16 @@ class LayoutPolicy:
 
         def post_translate_impl(engine, paragraph, tracker, translate_input, translated_text):
             from linguafloat.document_scientific import check_formula_tokens, translate_formula_segments
-            if not check_formula_tokens(translate_input, translated_text):
+            from linguafloat.document_richtext import validate_styles, caption_brackets_match
+            def valid(text):
+                return (check_formula_tokens(translate_input, text) and validate_styles(translate_input, text)
+                        and caption_brackets_match(translate_input, text))
+            if not valid(translated_text):
+                if policy.scientific:
+                    # A reply with damaged anchors must never remain a success
+                    # cache entry, even if the separate repair request succeeds.
+                    for key in policy.request_keys.get(id(paragraph), ()):
+                        policy.scientific.translator.store.discard(key)
                 if policy.scientific:
                     translator = policy.scientific.translator
                     previous = translator.location
@@ -731,10 +827,13 @@ class LayoutPolicy:
                         translated_text = translate_formula_segments(translate_input, translator)
                     finally:
                         translator.location = previous
-                if not check_formula_tokens(translate_input, translated_text):
-                    error = DocumentError(f"[公式占位符校验失败] 段落 {paragraph.debug_id}：补译后公式仍有丢失、重复或顺序变化。未发布损坏公式。")
+                if not valid(translated_text):
+                    error = DocumentError(f"[公式/样式校验失败] 段落 {paragraph.debug_id}：补译后仍有公式、格式标记或图注括号归属变化，已保留原文。")
                     raise error
-            return policy._saved["post_translate"](engine, paragraph, tracker, translate_input, translated_text)
+            result = policy._saved["post_translate"](engine, paragraph, tracker, translate_input, translated_text)
+            from linguafloat.document_richtext import remap_unchanged_prose
+            remap_unchanged_prose(paragraph, translate_input, translated_text)
+            return result
 
         def recover(paragraph, error, stage):
             try:
@@ -779,6 +878,9 @@ class LayoutPolicy:
         ILTranslatorLLMOnly.translate = lambda engine, docs: translated(engine, docs, "translate_llm")
         ILTranslator.post_translate_paragraph = post_translate
         ILTranslator.pre_translate_paragraph = pre_translate
+        from linguafloat.document_richtext import styled_translate_input
+        ILTranslator.get_translate_input = lambda engine, paragraph, *a, **kw: styled_translate_input(
+            engine, paragraph, policy._saved["translate_input"], *a, **kw)
         ILTranslator.translate_paragraph = lambda engine, paragraph, *a, **kw: located(engine, paragraph, *a, **kw)
         ILTranslatorLLMOnly.translate_paragraph = lambda engine, batch_paragraph, *a, **kw: located(engine, batch_paragraph, *a, batch=True, **kw)
         return self
@@ -801,6 +903,7 @@ class LayoutPolicy:
         ILTranslatorLLMOnly.translate = self._saved["translate_llm"]
         ILTranslator.post_translate_paragraph = self._saved["post_translate"]
         ILTranslator.pre_translate_paragraph = self._saved["pre_translate"]
+        ILTranslator.get_translate_input = self._saved["translate_input"]
         ILTranslator.translate_paragraph = self._saved["paragraph"]
         ILTranslatorLLMOnly.translate_paragraph = self._saved["batch"]
         if self._saved["passthrough_copy"] is None:

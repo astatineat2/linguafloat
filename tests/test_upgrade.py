@@ -4,7 +4,7 @@ import time
 import pytest
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QMessageBox
+from linguafloat.ui import QMessageBox
 
 import linguafloat.capture as capture_module
 import linguafloat.clipboard_io as clipboard_module
@@ -176,13 +176,13 @@ def test_panel_actual_side_drag_changes_only_requested_dimension(controller, app
 
 
 @pytest.mark.parametrize("edge", ["left", "right", "top", "bottom"])
-def test_outline_side_hit_areas_are_resizable(application, edge):
+def test_outline_sides_resize_and_interior_remains_draggable(application, edge):
     outline = RegionOutline()
     outline.show_region(QRect(100, 100, 200, 100))
     points = {"left": QPoint(1, 40), "right": QPoint(outline.width()-1, 40),
               "top": QPoint(25, 1), "bottom": QPoint(25, outline.height()-1)}
     assert outline._corner_at(points[edge]) == edge
-    assert not outline.mask().contains(outline.rect().center())
+    assert outline.mask().contains(outline.rect().center())
     outline.close()
 
 

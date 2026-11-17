@@ -179,7 +179,8 @@ class AppController(QObject):
     def _save_document_preferences(self,values):
         allowed={"document_source_language","document_target_language","document_pdf_mode",
                  "document_translate_graphics","document_skip_references","document_mono","document_bilingual","document_bilingual_layout",
-                 "document_column_widths"}
+                 "document_column_widths", "document_chinese_font", "document_latin_font", "document_font_confirmed",
+                 "document_graphics_figures", "document_graphics_tables"}
         for name,value in values.items():
             if name in allowed:setattr(self.settings,name,value)
         self.config_store.save(self.settings)

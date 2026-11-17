@@ -36,6 +36,16 @@ class DocumentRequestError(DocumentError):
         self.details = details or {}
 
 
+def recoverable_transport(error):
+    """Only exhausted transport attempts in explicitly optional work may recover.
+
+    HTTP errors, configuration failures and cancellation remain task-fatal.
+    Never infer a connection problem from arbitrary exception message text.
+    """
+    return (isinstance(error, DocumentRequestError) and not error.details.get('http_status')
+            and error.details.get('error_type') in {'APIConnectionError', 'APITimeoutError'})
+
+
 def pricing_scope(provider):
     return json.dumps([provider.get(k, "") for k in ("id", "base_url", "model", "api_mode")], ensure_ascii=False)
 
@@ -171,8 +181,30 @@ class DocumentJob:
     graphic_overrides: dict = field(default_factory=dict)
     skip_references: bool = False
     reference_boundary: dict = field(default_factory=dict)
+    chinese_font: str = ""
+    latin_font: str = ""
+    workflow: str = "legacy"
+    parent_job_id: str = ""
+    graphics_source: str = ""
 
     def validate(self):
+        if self.workflow not in {"legacy", "body", "graphics"}:
+            raise DocumentError("文档处理流程无效。")
+        if self.workflow == "body" and self.translate_figures:
+            raise DocumentError("正文任务不自动翻译图片，请在正文完成后点击“图片翻译”。")
+        if self.workflow == "graphics" and (not self.parent_job_id or not self.graphics_source
+                or not (self.translate_figures or self.translate_tables) or self.pdf_mode != "layout"):
+            raise DocumentError("图表补译需要已完成的正文任务和至少一种图表内容。")
+        if self.chinese_font not in {"", "simsun", "msyh"} or self.latin_font not in {"", "times"}:
+            raise DocumentError("译文字体设置无效。")
+        if bool(self.chinese_font) != bool(self.latin_font):
+            raise DocumentError("请同时选择中文和英文字体。")
+        if self.chinese_font:
+            from linguafloat.document_fonts import validate_fonts, FontPolicyError
+            try:
+                validate_fonts(self.chinese_font, self.latin_font)
+            except FontPolicyError as exc:
+                raise DocumentError(str(exc)) from exc
         source = Path(self.source)
         if not source.is_file() or source.suffix.lower() not in SUPPORTED:
             raise DocumentError("请选择 PDF、DOCX、PPTX 或 PNG/JPG/TIFF 文件。旧版 DOC/PPT 请先另存为新格式。")
@@ -210,6 +242,7 @@ class JobStore:
             CREATE TABLE IF NOT EXISTS request_events (job_id TEXT, request_id TEXT,
                 updated REAL, details TEXT);
             CREATE INDEX IF NOT EXISTS request_events_job ON request_events(job_id, updated);
+            CREATE TABLE IF NOT EXISTS diagnostic_events (job_id TEXT, updated REAL, details TEXT);
         """)
         self.db.commit()
 
@@ -230,6 +263,12 @@ class JobStore:
         with self.lock, self.db:
             self.db.execute("INSERT INTO request_events VALUES (?,?,?,?)", (
                 job.job_id, event["request_id"], event["timestamp"], json.dumps(event, ensure_ascii=False)))
+
+    def diagnostic_event(self, job, event):
+        # This channel accepts metadata only, never arbitrary exception messages.
+        allowed = {k: event[k] for k in ("component", "error_type", "event_type", "process_state") if k in event}
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO diagnostic_events VALUES (?,?,?)", (job.job_id, time.time(), json.dumps(allowed)))
 
     def status(self, job: DocumentJob, status: str, details=None):
         with self.lock, self.db:
@@ -254,11 +293,19 @@ class JobStore:
                     bilingual_layout=job.bilingual_layout, translate_tables=job.translate_tables,
                     translate_figures=job.translate_figures, request_timeout=job.request_timeout,
                     document_concurrency=job.provider.get("document_concurrency", 2))
+                info["configuration"].update(chinese_font=job.chinese_font, latin_font=job.latin_font,
+                    workflow=job.workflow, parent_job_id=job.parent_job_id,
+                    table_policy="independent-tables-v1" if job.translate_tables else "preserve-tables-v1")
+                info["configuration"]["request_policy"] = {key: job.provider.get(key, default) for key, default in (
+                    ("retries", 2), ("document_rpm", 60), ("document_tpm", 0), ("output_token_limit", 0),
+                    ("reasoning_effort", ""), ("thinking_mode", ""), ("instruction_role", "system"))}
+                info["configuration"]["timeouts"] = dict(connect=15, read=job.request_timeout, write=30, pool=15,
+                                                           logical_total=None)
             if status == "running" and "started_at" not in info:
                 info.update(started_at=now, input_tokens=0, output_tokens=0, total_tokens=0,
                             unreported_requests=0, reported_requests=0, usage_state="waiting")
             info.update(details or {})
-            if status in {"completed", "failed", "cancelled"} and "finished_at" not in info:
+            if status in {"completed", "partial", "failed", "cancelled"} and "finished_at" not in info:
                 info["usage_state"] = "finished"
                 info["finished_at"] = now
                 if "started_at" in info:
@@ -291,23 +338,30 @@ class JobControl:
     cancelled: threading.Event = field(default_factory=threading.Event)
     paused: threading.Event = field(default_factory=PauseEvent)
 
-    def checkpoint(self):
+    def checkpoint(self, failure=None):
         while self.paused.is_set():
             if self.cancelled.wait(0.1):
                 raise Cancelled("任务已取消，可重新开始并复用缓存。")
+            if failure and (error := failure()) is not None:
+                raise error
         if self.cancelled.is_set():
             raise Cancelled("任务已取消，可重新开始并复用缓存。")
+        if failure and (error := failure()) is not None:
+            raise error
 
 
 class DocumentTranslator:
     def __init__(self, job, key, store, control, emit, client=None):
-        from openai import OpenAI
+        from openai import OpenAI, DefaultHttpxClient
         import httpx
         self.job, self.store, self.control, self.emit = job, store, control, emit
         self.provider = copy.deepcopy(job.provider)
         self._key = key or ""
+        self._network = threading.local()
+        timeout = httpx.Timeout(job.request_timeout, connect=15, write=30, pool=15)
         self.client = client or OpenAI(api_key=key or "cache-only", base_url=normalize_base_url(self.provider["base_url"]),
-                                      timeout=httpx.Timeout(job.request_timeout, connect=15, write=30, pool=15), max_retries=0)
+                                      timeout=timeout, max_retries=0, http_client=DefaultHttpxClient(
+                                          timeout=timeout, event_hooks={"request": [self._trace_http]}))
         self.adapter = ApiAdapter(self.client, self.provider, session_scope="document:" + job.job_id)
         self.lock = threading.RLock()
         from linguafloat.document_scheduler import RequestGate
@@ -317,17 +371,41 @@ class DocumentTranslator:
         self.calls = self.hits = 0
         self.request_sequence = 0
         self.request_attempts = {}
+        self.attempt_started = {}
         self.last_request = 0.0
         self._locations = threading.local()
         self._owner_thread = threading.get_ident()
         self._default_location = "文档"
         self.location = "文档"
+        self.graphic_failure = None
         self.retries = max(0, min(3, int(self.provider.get("retries", 2))))
         self.token_usage = dict(input_tokens=0, output_tokens=0, total_tokens=0,
                                unreported_requests=0, reported_requests=0)
         from linguafloat.document_context import SourceContext, GraphicContext
         self.source_context = SourceContext()
         self.graphic_context = GraphicContext()
+
+    def _trace_http(self, request):
+        metrics = getattr(self._network, "metrics", None)
+        if metrics is None:
+            return
+        spans = {}
+        names = {"connect_tcp": "网络连接", "start_tls": "TLS 握手", "send_request_headers": "请求头发送",
+                 "send_request_body": "请求体发送", "receive_response_headers": "等待响应头",
+                 "receive_response_body": "响应体读取"}
+        def trace(name, info):
+            # httpcore info can contain headers, URLs and bodies: deliberately ignore it.
+            operation, _, state = name.rpartition(".")
+            label = names.get(operation.rsplit(".", 1)[-1])
+            if not label:
+                return
+            if state == "started":
+                spans[operation] = active_clock(self.control)
+            elif state in {"complete", "failed"} and operation in spans:
+                metrics[label] = metrics.get(label, 0) + max(0, active_clock(self.control) - spans.pop(operation))
+                if state == 'failed':
+                    self._network.failure_stage = label
+        request.extensions["trace"] = trace
 
     def set_source_context(self, blocks):
         from linguafloat.document_context import SourceContext
@@ -380,9 +458,9 @@ class DocumentTranslator:
     def wait(self, seconds):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            self.control.checkpoint()
+            self.control.checkpoint(lambda: self.fatal_error)
             self.control.cancelled.wait(min(.1, max(0, deadline - time.monotonic())))
-        self.control.checkpoint()
+        self.control.checkpoint(lambda: self.fatal_error)
 
     def messages(self, text):
         return [
@@ -401,40 +479,59 @@ class DocumentTranslator:
                              ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()
 
-    def translate_fragment(self, text, context, *, part="公式旁文字"):
+    def translate_fragment(self, text, context, *, part="公式旁文字", recover_transport=False, validate=None):
         messages = self.messages(text)
         messages[0]["content"] += (" The user data is JSON containing fragment and context. "
                                    "Translate only fragment, using context to resolve meaning. "
                                    "Do not output or translate context. Keep the fragment's grammatical role.")
         messages[1]["content"] = json.dumps(dict(fragment=text, context=context[:6000]), ensure_ascii=False)
-        return self.request(messages, part=part)
+        if recover_transport:
+            # Also versions the label cache independently of body translations.
+            messages[0]['content'] += (" Graphic label policy v2: translate only the literal fragment, "
+                "never expand it to the surrounding caption or add strain IDs, units or numbers from context.")
+            if validate is None:
+                from linguafloat.document_graphics import validate_graphic_fragment
+                validate = lambda value: validate_graphic_fragment(text, value)
+        return self.request(messages, part=part, recover_transport=recover_transport, validate=validate)
 
     def trace_request(self, identity, state, label, digest, started, attempt=None, **details):
         attempt = self.request_attempts.get(identity, 0) if attempt is None else attempt
         self.request_attempts[identity] = attempt
+        now = time.monotonic()
+        if state == "started":
+            self.attempt_started[identity] = now
+        attempt_elapsed = max(0, now - self.attempt_started[identity]) if identity in self.attempt_started else None
         event = dict(request_id=identity, state=state, location=label, cache_key=digest,
                      timestamp=time.time(), elapsed_seconds=max(0, time.monotonic() - started),
                      attempt=attempt, **details)
+        if attempt_elapsed is not None:
+            event["attempt_elapsed_seconds"] = attempt_elapsed
         self.store.request_event(self.job, event)
         text = {"queued": "等待并发名额或限流额度", "waiting": "等待 API 返回",
                 "started": "等待 API 返回", "retry": "等待重试", "cached": "复用译文缓存",
                 "shared": "复用相同请求", "success": "请求完成", "failed": "请求失败",
-                "cancelled": "已取消"}[state]
-        message = f"{label} · 请求 {identity} · {text} · 已用时 {event['elapsed_seconds']:.0f} 秒"
+                "queue_wait": "等待发送名额", "cancelled": "已取消"}[state]
+        message = f"{label} · 请求 {identity} · {text} · 累计 {event['elapsed_seconds']:.0f} 秒"
         if state in {"waiting", "started"}:
-            message += f"（读取超时 {self.job.request_timeout} 秒，第 {attempt + 1} 次尝试）"
+            message += f"（本次 {attempt_elapsed or 0:.0f} 秒，读取超时 {self.job.request_timeout} 秒，第 {attempt + 1} 次尝试）"
+        if state == "queue_wait":
+            message += f"（{details.get('wait_reason', '等待并发名额')}，本轮排队 {details.get('queue_seconds', 0):.0f} 秒）"
         if state == "retry":
             message += f"（退避 {details.get('retry_after', 0):.0f} 秒）"
         self.emit(dict(type="activity", stage="翻译中", stage_key="requests", value=None,
                        message=message, request=event))
+        if state == "retry":
+            self.attempt_started.pop(identity, None)
         if state in {"success", "failed", "cancelled", "cached", "shared"}:
             self.request_attempts.pop(identity, None)
+            self.attempt_started.pop(identity, None)
 
     def usage(self):
         with self.lock:
+            self.store.record_usage(self.job, {"requests": self.calls, "cache_hits": self.hits})
             self.emit({"type": "usage", "usage_state": "measured", "requests": self.calls, "cache_hits": self.hits, **self.token_usage})
 
-    def request(self, messages, *, budget=None, adaptive=False, part=""):
+    def request(self, messages, *, budget=None, adaptive=False, part="", recover_transport=False, validate=None):
         import openai
         digest = self.cache_key(messages)
         budget = [self.retries] if budget is None else budget
@@ -448,6 +545,12 @@ class DocumentTranslator:
             started = time.monotonic()
             cached = self.store.get(digest)
             if cached is not None:
+                if validate:
+                    try:
+                        validate(cached)
+                    except DocumentError:
+                        self.store.discard(digest)
+                        raise
                 self.hits += 1
                 self.usage()
                 self.trace_request(identity, "cached", label, digest, started)
@@ -474,14 +577,16 @@ class DocumentTranslator:
             return value
         try:
             self.trace_request(identity, "queued", label, digest, started)
-            value = self._send(self.contextual_messages(messages), budget, adaptive, label, digest, identity, started)
+            value = self._send(self.contextual_messages(messages), budget, adaptive, label, digest, identity, started, validate)
             future.set_result(value)
             self.control.checkpoint()
             return value
         except BaseException as exc:
-            if isinstance(exc, DocumentRequestError) and not (adaptive and exc.timeout):
+            if (isinstance(exc, DocumentRequestError) and not (adaptive and exc.timeout)
+                    and not (recover_transport and recoverable_transport(exc))):
                 with self.lock:
                     self.fatal_error = exc
+                self.gate.stop(exc)
             self.trace_request(identity, "cancelled" if isinstance(exc, Cancelled) else "failed",
                                label, digest, started, **getattr(exc, "details", {"error_type": type(exc).__name__}))
             if not future.done():
@@ -491,7 +596,7 @@ class DocumentTranslator:
             with self.lock:
                 self.inflight.pop(digest, None)
 
-    def _send(self, messages, budget, adaptive, label, digest, identity, request_started):
+    def _send(self, messages, budget, adaptive, label, digest, identity, request_started, validate=None):
         import openai
         from linguafloat.document_scheduler import retry_delay
         try:
@@ -501,9 +606,19 @@ class DocumentTranslator:
         attempt = 0
         while True:
             started = active_clock(self.control)
-            reservation = self.gate.acquire(messages)
+            last_notice = [0.0]
+            def queued(reason):
+                now = time.monotonic()
+                if now - last_notice[0] >= 2:
+                    last_notice[0] = now
+                    self.trace_request(identity, "queue_wait", label, digest, request_started, attempt,
+                                       queue_seconds=max(0, active_clock(self.control) - started), wait_reason=reason)
+            reservation = self.gate.acquire(messages, on_wait=queued)
             self.emit({"type": "measurement", "name": "并发及限流等待", "seconds": active_clock(self.control) - started})
             actual = None
+            supplier_id = None
+            metrics = {}
+            failure_stage = None
             try:
                 self.control.checkpoint()
                 if self.fatal_error is not None:
@@ -521,15 +636,27 @@ class DocumentTranslator:
                 watcher = threading.Thread(target=heartbeat, daemon=True)
                 watcher.start()
                 started = active_clock(self.control)
+                self._network.metrics = {}
+                self._network.failure_stage = None
                 try:
                     def received(raw):
-                        nonlocal actual
+                        nonlocal actual, supplier_id
                         actual = self.record_tokens(raw)
+                        from linguafloat.api_compat import safe_text
+                        raw_id = getattr(raw, "_request_id", None)
+                        if raw_id:
+                            supplier_id = safe_text(raw_id, secrets=(self._key,), limit=100)
                     result = self.adapter.request(messages, on_response=received)
                     value = result.text
                 finally:
                     stopped.set()
                     watcher.join()
+                    metrics = self._network.metrics
+                    failure_stage = self._network.failure_stage
+                    self._network.metrics = None
+                    self._network.failure_stage = None
+                    for name, seconds in metrics.items():
+                        self.emit({"type": "measurement", "name": name, "seconds": seconds})
                     self.emit({"type": "measurement", "name": "HTTP 请求", "seconds": active_clock(self.control) - started})
             except DocumentError:
                 raise
@@ -539,6 +666,11 @@ class DocumentTranslator:
                 retryable = isinstance(exc, openai.APIConnectionError) or code in {408, 429, 500, 502, 503, 504}
                 reason, details = error_details(exc, self.provider, key=self._key,
                     source_texts=tuple(m.get("content", "") for m in messages), request_id=identity)
+                if metrics:
+                    details["network_timings"] = metrics
+                if failure_stage:
+                    details['network_failure_stage'] = failure_stage
+                    reason += '\n连接失败环节：' + failure_stage
                 if isinstance(exc, ApiResponseError):
                     raise DocumentError(f"[翻译响应校验失败] {reason}") from None
                 delay = retry_delay(exc, attempt)
@@ -547,13 +679,14 @@ class DocumentTranslator:
                     error = DocumentRequestError(f"{label} · 请求 {identity}：{reason}", details=details)
                     with self.lock:
                         self.fatal_error = error
+                    self.gate.stop(error)
                     raise error from None
                 if code == 429:
                     self.emit({"type": "measurement", "name": "HTTP 429 限流", "seconds": 0})
                 if timed_out:
                     self.emit({"type": "measurement", "name": "请求超时", "seconds": 0})
                 if code == 429 or timed_out:
-                    self.gate.backoff(delay)
+                    self.gate.backoff(delay, rate_limited=code == 429)
                 if timed_out and adaptive:
                     raise DocumentRequestError(f"{label} · 请求 {identity}：{reason}", timeout=True, details=details) from None
                 if retryable and budget[0] > 0 and delay <= 120:
@@ -563,6 +696,8 @@ class DocumentTranslator:
                                        retry_after=delay, **details)
                     self.emit({"type": "measurement", "name": "请求重试", "seconds": 0})
                     self.emit({"type": "activity", "message": f"{label}：{reason} 退避约 {delay:.0f} 秒，剩余重试额度 {budget[0]}。"})
+                    self.gate.release(reservation, actual)
+                    reservation = None
                     started = active_clock(self.control)
                     self.wait(delay)
                     self.emit({"type": "measurement", "name": "重试退避", "seconds": active_clock(self.control) - started})
@@ -571,16 +706,21 @@ class DocumentTranslator:
                     reason += f" 服务商要求等待约 {delay:.0f} 秒，已停止自动重试，请稍后重试。"
                 raise DocumentRequestError(f"{label} · 请求 {identity}：{reason}", timeout=timed_out, details=details) from None
             finally:
-                self.gate.release(reservation, actual)
+                if reservation is not None:
+                    self.gate.release(reservation, actual)
             if not value or not value.strip():
                 raise DocumentError(f"{label}：模型返回了空译文，请检查模型或更换供应商。")
             value = value.strip()
+            if validate:
+                validate(value)
             self.store.put(digest, value)
             with self.lock:
                 self.calls += 1
                 self.usage()
             self.gate.success()
-            self.trace_request(identity, "success", label, digest, request_started, attempt)
+            self.trace_request(identity, "success", label, digest, request_started, attempt,
+                               network_timings=metrics,
+                               **({"supplier_request_id": supplier_id} if supplier_id else {}))
             return value
 
     def translate(self, text):

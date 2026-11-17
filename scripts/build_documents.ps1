@@ -1,4 +1,4 @@
-param([string]$AppPython = "", [string]$DocumentPython = "", [switch]$Publish)
+﻿param([string]$AppPython = "", [string]$DocumentPython = "", [switch]$Publish)
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $AppPython) { $AppPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe" }

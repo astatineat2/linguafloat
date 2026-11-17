@@ -17,14 +17,16 @@ def test_drag_fit_restore_and_updates_keep_columns(controller,tmp_path):
     for name,index in [('files',0),('history',1)]:
         tree=getattr(page,name);page.file_tabs.setCurrentIndex(index)
         page.scroll.verticalScrollBar().setValue(0)
-        QTest.qWait(30)
+        QTest.qWait(220)
         header=tree.header()
         assert all(header.sectionResizeMode(i)==QHeaderView.ResizeMode.Interactive for i in range(tree.columnCount()))
         old=tree.columnWidth(0)
+        # Exercise overflow even when the current layout has unused width.
+        drag=max(75,tree.viewport().width()-sum(tree.columnWidth(i) for i in range(tree.columnCount()))+100)
         point=QPoint(header.sectionViewportPosition(0)+old-1,header.height()//2)
         QTest.mousePress(header.viewport(),Qt.MouseButton.LeftButton,pos=point)
-        QTest.mouseMove(header.viewport(),point+QPoint(75,0),delay=20)
-        QTest.mouseRelease(header.viewport(),Qt.MouseButton.LeftButton,pos=point+QPoint(75,0))
+        QTest.mouseMove(header.viewport(),point+QPoint(drag,0),delay=20)
+        QTest.mouseRelease(header.viewport(),Qt.MouseButton.LeftButton,pos=point+QPoint(drag,0))
         # Header sizes change immediately; the view updates its scroll range later.
         for _ in range(20):
             QTest.qWait(25)

@@ -9,11 +9,44 @@ from linguafloat.document_geometry import (attach_formula_rules, join_fragmented
 from linguafloat.document_layout import LayoutPolicy, bounds
 from linguafloat.document_core import JobControl
 from test_document_layout import engine_fixture
+from linguafloat.document_scientific import composition_chars
 
 
 def char(text, box, size=9):
     return PdfCharacter(char_unicode=text, pdf_character_id=ord(text), box=box,
                         visual_bbox=VisualBbox(copy.copy(box)), pdf_style=PdfStyle(font_id="body", font_size=size))
+
+
+def test_detached_citation_rejoins_native_prose_before_translation():
+    from linguafloat.document_geometry import attach_detached_citations
+    chars=[char(c,Box(20+i*5,100,25+i*5,110),10) for i,c in enumerate('word,next')]
+    # Native reference falls in the physical gap after the comma.
+    for c in chars[5:]:c.box.x+=8;c.box.x2+=8
+    owner=PdfParagraph(unicode='word,next',box=Box(20,100,73,110),pdf_style=chars[0].pdf_style,
+        pdf_paragraph_composition=[PdfParagraphComposition(pdf_line=PdfLine(pdf_character=chars))])
+    script=char('2',Box(45.2,104.4,49.2,111),6.6)
+    orphan=PdfParagraph(unicode='2',box=script.box,pdf_style=script.pdf_style,
+        pdf_paragraph_composition=[PdfParagraphComposition(pdf_character=script)])
+    page=Page(pdf_paragraph=[owner,orphan])
+    assert attach_detached_citations(page)
+    assert page.pdf_paragraph==[owner]
+    formula=next(p.pdf_formula for p in owner.pdf_paragraph_composition if p.pdf_formula)
+    assert formula.pdf_character==[script] and formula.is_corner_mark
+    assert formula.y_offset==pytest.approx(4.4)
+    assert [c for p in owner.pdf_paragraph_composition for c in composition_chars(p)]==chars[:5]+[script]+chars[5:]
+
+
+def test_detached_subscript_or_ambiguous_owner_is_not_claimed():
+    from linguafloat.document_geometry import attach_detached_citations
+    base=char('x',Box(20,100,25,110),10)
+    p=PdfParagraph(unicode='x',box=base.box,pdf_style=base.pdf_style,
+        pdf_paragraph_composition=[PdfParagraphComposition(pdf_character=base)])
+    script=char('2',Box(25.1,97,29,103),6)
+    q=PdfParagraph(unicode='2',box=script.box,pdf_style=script.pdf_style,
+        pdf_paragraph_composition=[PdfParagraphComposition(pdf_character=script)])
+    assert not attach_detached_citations(Page(pdf_paragraph=[p,q]))
+    script.box.y=104;script.box.y2=111
+    assert not attach_detached_citations(Page(pdf_paragraph=[p,copy.deepcopy(p),q]))
 
 
 def fraction():

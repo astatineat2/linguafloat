@@ -69,9 +69,16 @@ class LayoutSnapshot:
         options = request_options(job.provider)
         if options:
             scope["request_options"] = options
+        if job.translate_tables:
+            scope["table_policy"] = "independent-tables-v1"
         if policy_key:
             scope["scientific_policy"] = policy_key
         self.key = hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
+        # The snapshot contains translated text *before* typesetting. Font changes
+        # reuse it without any request; only the identity of rendered output changes.
+        from linguafloat.document_fonts import font_policy_key
+        font_key = font_policy_key(getattr(job, "chinese_font", ""), getattr(job, "latin_font", ""))
+        self.render_key = hashlib.sha256((self.key + ":" + font_key).encode()).hexdigest() if font_key else self.key
         self.folder = Path(directory) / "layout-cache"
         self.path = self.folder / (self.key + ".zip")
         self.graphic_context = []

@@ -100,6 +100,11 @@ class AppSettings:
     document_bilingual: bool = True
     document_bilingual_layout: str = "side_by_side"
     document_column_widths: dict = field(default_factory=dict)
+    document_chinese_font: str = "simsun"
+    document_latin_font: str = "times"
+    document_font_confirmed: bool = True
+    document_graphics_figures: bool = True
+    document_graphics_tables: bool = True
 
     def active_profile(self) -> ProviderProfile:
         for profile in self.providers:
@@ -183,6 +188,11 @@ class ConfigStore:
             document_bilingual=raw.get("document_bilingual",True) is True,
             document_bilingual_layout=option("document_bilingual_layout",{"side_by_side","alternating"},"side_by_side"),
             document_column_widths=self._column_widths(raw.get("document_column_widths")),
+            document_chinese_font=option("document_chinese_font", {"simsun", "msyh"}, "simsun"),
+            document_latin_font="times",
+            document_font_confirmed=raw.get("document_font_confirmed") is True,
+            document_graphics_figures=raw.get("document_graphics_figures", True) is True,
+            document_graphics_tables=raw.get("document_graphics_tables", True) is True,
         )
 
     @staticmethod

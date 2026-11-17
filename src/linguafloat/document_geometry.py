@@ -23,6 +23,217 @@ def owns(box, char):
     return b and box.x - .3 <= (b.x+b.x2)/2 <= box.x2 + .3 and box.y - .3 <= (b.y+b.y2)/2 <= box.y2 + .3
 
 
+def source_style(parts, fallback):
+    from linguafloat.document_scientific import composition_chars
+    styles = [c.pdf_style for p in parts if not p.pdf_formula for c in composition_chars(p)
+              if c.pdf_style and c.pdf_style.font_size and (c.char_unicode or '').strip()]
+    if not styles:
+        return copy.copy(fallback)
+    counts = Counter((s.font_id, s.font_size) for s in styles)
+    key = counts.most_common(1)[0][0]
+    return copy.copy(next(s for s in styles if (s.font_id, s.font_size) == key))
+
+
+def attach_detached_citations(page):
+    """Rejoin a raised numeric native fragment to its unique preceding glyph.
+
+    Only source coordinates decide ownership. No translated word matching or
+    guessed citation placement is used. Subscripts, equal-size data and
+    ambiguous owners remain untouched.
+    """
+    from babeldoc.format.pdf.document_il import PdfFormula, PdfParagraphComposition as Part
+    from linguafloat.document_scientific import composition_chars
+    changes = []
+    for orphan in list(page.pdf_paragraph):
+        if not re.fullmatch(r'\d{1,3}(?:\s*[,–−-]\s*\d{1,3})*', (orphan.unicode or '').strip()):
+            continue
+        scripts = [c for part in orphan.pdf_paragraph_composition for c in composition_chars(part)]
+        if not scripts or any(not c.box or not c.pdf_style for c in scripts):
+            continue
+        if any(p.pdf_formula and (p.pdf_formula.pdf_curve or p.pdf_formula.pdf_form)
+               for p in orphan.pdf_paragraph_composition):
+            continue
+        sb = union([c.box for c in scripts])
+        script_size = max(c.pdf_style.font_size or 0 for c in scripts)
+        matches = []
+        for owner in page.pdf_paragraph:
+            if owner is orphan or sum(c.isalpha() for c in owner.unicode or '') < 6:
+                continue
+            candidates = []
+            for index, part in enumerate(owner.pdf_paragraph_composition):
+                if part.pdf_formula:
+                    continue
+                for offset, c in enumerate(composition_chars(part)):
+                    if not c.box or not c.pdf_style or not (c.char_unicode or '').strip():
+                        continue
+                    size = c.pdf_style.font_size or 0
+                    gap, lift = sb.x-c.box.x2, sb.y-c.box.y
+                    if (size and script_size < size*.85 and -.1 <= gap <= max(1.5,size*.3)
+                            and size*.15 <= lift <= size*.85
+                            and all(s.xobj_id == c.xobj_id for s in scripts)):
+                        candidates.append((gap,index,offset,c))
+            if candidates:
+                matches.append((owner,min(candidates,key=lambda x:abs(x[0]))))
+        if len(matches) != 1:
+            continue
+        owner,(_,index,offset,base) = matches[0]
+        part=owner.pdf_paragraph_composition[index]
+        chars=composition_chars(part)
+        replacement=[]
+        for subset in (chars[:offset+1],scripts,chars[offset+1:]):
+            if not subset:
+                continue
+            if subset is scripts:
+                replacement.append(Part(pdf_formula=PdfFormula(box=sb,pdf_character=scripts,
+                    x_offset=0,y_offset=sb.y-base.box.y,x_advance=0,is_corner_mark=True)))
+            elif part.pdf_character:
+                replacement.extend(Part(pdf_character=c) for c in subset)
+            else:
+                kind='pdf_line' if part.pdf_line else 'pdf_same_style_characters'
+                container=copy.copy(getattr(part,kind));container.pdf_character=list(subset)
+                container.box=union([c.box for c in subset])
+                replacement.append(Part(**{kind:container}))
+        owner.pdf_paragraph_composition[index:index+1]=replacement
+        from babeldoc.format.pdf.document_il.utils.layout_helper import get_char_unicode_string
+        owner.unicode=get_char_unicode_string([c for p in owner.pdf_paragraph_composition for c in composition_chars(p)])
+        page.pdf_paragraph.remove(orphan)
+        changes.append(dict(kind='detached_citation',text=orphan.unicode,owner=owner.debug_id))
+    return changes
+
+
+def split_source_columns(page, source_lines):
+    """Split a merged source paragraph only when native lines prove a gutter.
+
+    This runs before translation, preserving the glyph objects and their IDs.
+    Full-width lines and formulas crossing the proposed gutter veto the split.
+    """
+    from babeldoc.format.pdf.document_il import Box, PdfParagraphComposition
+    from linguafloat.document_scientific import composition_chars
+    changes = []
+    rebuilt = []
+    for paragraph in page.pdf_paragraph:
+        b = paragraph.box
+        if not b or b.x2-b.x < 200 or b.y2-b.y < 18:
+            rebuilt.append(paragraph)
+            continue
+        middle = (b.x+b.x2)/2
+        lines = [r for r in source_lines if r[0] >= b.x-3 and r[2] <= b.x2+3
+                 and b.y-3 <= (r[1]+r[3])/2 <= b.y2+3 and r[2]-r[0] > (b.x2-b.x)*.18]
+        left = [r for r in lines if r[2] < middle]
+        right = [r for r in lines if r[0] > middle]
+        if len(left) < 3 or len(right) < 3 or len(left)+len(right) != len(lines):
+            rebuilt.append(paragraph)
+            continue
+        low, high = max(r[2] for r in left), min(r[0] for r in right)
+        overlap = min(max(r[3] for r in left), max(r[3] for r in right))-max(min(r[1] for r in left), min(r[1] for r in right))
+        if high-low < 5 or overlap < 18:
+            rebuilt.append(paragraph)
+            continue
+        gutter = (low+high)/2
+        groups = [[], []]
+        safe = True
+        for part in paragraph.pdf_paragraph_composition:
+            chars = composition_chars(part)
+            if not chars or any(not c.box for c in chars):
+                safe = False
+                break
+            sides = [int((c.box.x+c.box.x2)/2 > gutter) for c in chars]
+            formula_box = union([part.pdf_formula.box, *(box_of(c) for c in chars)]) if part.pdf_formula else None
+            # Formula boxes can include trailing advances through the gutter.
+            # Keep the expression atomic, but veto only if its glyphs span both
+            # sides or its box reaches the opposite column's native text.
+            if part.pdf_formula and (len(set(sides)) != 1 or
+                                     (sides[0] == 0 and formula_box.x2 > high + .5) or
+                                     (sides[0] == 1 and formula_box.x < low - .5)):
+                safe = False
+                break
+            if len(set(sides)) == 1:
+                groups[sides[0]].append(part)
+            else:
+                # A detected line can itself contain both columns. Split its
+                # glyph list without recreating fonts, symbols or coordinates.
+                for side in (0, 1):
+                    subset = [c for c, s in zip(chars, sides) if s == side]
+                    name = "pdf_line" if part.pdf_line else "pdf_same_style_characters"
+                    container = copy.copy(getattr(part, name))
+                    if container is None:
+                        safe = False
+                        break
+                    container.pdf_character = subset
+                    container.box = union([c.box for c in subset])
+                    groups[side].append(PdfParagraphComposition(**{name: container}))
+        if not safe or not all(groups):
+            rebuilt.append(paragraph)
+            continue
+        for side, parts in enumerate(groups):
+            clone = copy.copy(paragraph)
+            clone.pdf_paragraph_composition = parts
+            clone.pdf_style = source_style(parts, paragraph.pdf_style)
+            column_lines = left if side == 0 else right
+            clone.box = Box(min(r[0] for r in column_lines), b.y,
+                            max(r[2] for r in column_lines), b.y2)
+            # The engine's glyph bounds include formula advances outside the
+            # visible source line. They must not widen the translation frame
+            # back across the verified native gutter.
+            clone.unicode = " ".join("".join(c.char_unicode or "" for c in composition_chars(p)) for p in parts)
+            if clone.debug_id is not None:
+                clone.debug_id = f"{clone.debug_id}-col{side+1}"
+            rebuilt.append(clone)
+        changes.append(dict(page=page.page_number+1, kind="source_columns", gutter=[low, high],
+                            source_box=[b.x,b.y,b.x2,b.y2]))
+    page.pdf_paragraph[:] = rebuilt
+    return changes
+
+
+def exclude_graphic_glyphs(page, areas):
+    """Remove protected source glyphs before requests, not whole mixed blocks.
+
+    Caption/body portions of a detector-merged paragraph remain independently
+    translatable. Formula compositions stay atomic. Restoration uses the same
+    figure rectangles, so excluded content is recovered from the original PDF.
+    """
+    if not areas:
+        return
+    from babeldoc.format.pdf.document_il import Box, PdfParagraphComposition
+    from linguafloat.document_scientific import composition_chars
+    height = page.cropbox.box.y2-page.cropbox.box.y
+    boxes = [Box(r["box"][0], height-r["box"][3], r["box"][2], height-r["box"][1]) for r in areas]
+    rebuilt = []
+    for paragraph in page.pdf_paragraph:
+        pieces, touched = [], False
+        for part in paragraph.pdf_paragraph_composition:
+            chars = composition_chars(part)
+            selected = [c for c in chars if not any(owns(b, c) for b in boxes)]
+            if len(selected) == len(chars):
+                pieces.append(part)
+                continue
+            touched = True
+            if not selected:
+                continue
+            if part.pdf_formula:
+                # A boundary-cut expression is not safe to send as a fragment.
+                # Keep it together outside the protected area; original figure
+                # restoration still takes precedence over its interior pixels.
+                pieces.append(part)
+                continue
+            name = "pdf_line" if part.pdf_line else "pdf_same_style_characters"
+            container = copy.copy(getattr(part, name))
+            if container is not None:
+                container.pdf_character = selected
+                container.box = union([c.box for c in selected])
+                pieces.append(PdfParagraphComposition(**{name: container}))
+        if not touched:
+            rebuilt.append(paragraph)
+        elif pieces:
+            paragraph.pdf_paragraph_composition = pieces
+            paragraph.pdf_style = source_style(pieces, paragraph.pdf_style)
+            glyphs = [c for p in pieces for c in composition_chars(p)]
+            paragraph.box = union([c.box for c in glyphs])
+            paragraph.unicode = " ".join("".join(c.char_unicode or "" for c in composition_chars(p)) for p in pieces)
+            rebuilt.append(paragraph)
+    page.pdf_paragraph[:] = rebuilt
+
+
 def join_fragmented_paragraphs(page, words=(), source_characters=()):
     """Join a wide body block with fragments of the same detected source line.
 
@@ -163,6 +374,8 @@ def attach_formula_rules(page):
             continue
         matches = []
         for formula, xobj_id in formulas:
+            if getattr(formula, '_lf_caption_marker', False):
+                continue
             if curve.xobj_id != xobj_id:
                 continue
             f = formula.box

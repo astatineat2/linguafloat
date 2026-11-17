@@ -56,13 +56,25 @@ def paragraph_in_plan(paragraph, page_height, plans):
     return any((rect & fitz.Rect(p["box"])).get_area() > rect.get_area()*.65 for p in plans)
 
 
-def centered_overlay(page, plan, texts, target, control):
+def centered_overlay(page, plan, texts, target, control, font_pair=("", "")):
     """Keep identifiers raised and choose two copyright lines before three."""
     import pymupdf as fitz
     from linguafloat.document_layout import font_scales
     box = fitz.Rect(plan["box"])
     size = median(s["size"] for l in plan["lines"] for s in l["spans"] if len(s["text"]) > 2)
     font = fitz.Font({"ja":"japan", "ko":"korea"}.get(target,"china-s"))
+    resolver = None
+    if font_pair[0]:
+        from linguafloat.document_fonts import FitzFontResolver
+        resolver = FitzFontResolver(*font_pair)
+    def width(text, fontsize):
+        return (sum(face.text_length(run, fontsize=fontsize) for run, face in resolver.runs(text))
+                if resolver else font.text_length(text, fontsize=fontsize))
+    def draw(p, origin, text, fontsize):
+        if resolver:
+            resolver.draw_line(p, origin, text, fontsize=fontsize)
+        else:
+            p.insert_text(origin, text, fontname="LFMeta", fontsize=fontsize)
     if any(not font.has_glyph(ord(c)) for _, text in texts for c in text if not c.isspace()):
         return None
     for scale in font_scales(size):
@@ -77,8 +89,8 @@ def centered_overlay(page, plan, texts, target, control):
                 row = ""
                 first = True
                 for token in tokens:
-                    prefix = font.text_length(label,fontsize=fs*.75)+2 if first and label else 0
-                    if row and font.text_length(row+token,fontsize=fs)+prefix > box.width:
+                    prefix = width(label,fs*.75)+2 if first and label else 0
+                    if row and width(row+token,fs)+prefix > box.width:
                         rows.append((label if first else "",row.strip()))
                         first,row = False,""
                     row += token
@@ -86,25 +98,26 @@ def centered_overlay(page, plan, texts, target, control):
                     rows.append((label if first else "",row.strip()))
             if plan["kind"] == "copyright" and len(rows) > 3:
                 continue
-            if any(font.text_length(t,fontsize=fs)+font.text_length(n,fontsize=fs*.75)+2 > box.width for n,t in rows):
+            if any(width(t,fs)+width(n,fs*.75)+2 > box.width for n,t in rows):
                 continue
             height = fs + max(0,len(rows)-1)*fs*spacing
             if height > box.height:
                 continue
             with fitz.open() as overlay:
                 p = overlay.new_page(width=page.rect.width,height=page.rect.height)
-                p.insert_font(fontname="LFMeta",fontbuffer=font.buffer)
+                if not resolver:
+                    p.insert_font(fontname="LFMeta",fontbuffer=font.buffer)
                 y = box.y0+fs
                 for label,text in rows:
-                    label_width = font.text_length(label,fontsize=fs*.75)+2 if label else 0
-                    width = font.text_length(text,fontsize=fs)+label_width
-                    x = (box.x0+box.x1-width)/2
+                    label_width = width(label,fs*.75)+2 if label else 0
+                    line_width = width(text,fs)+label_width
+                    x = (box.x0+box.x1-line_width)/2
                     if label:
-                        p.insert_text((x,y-fs*.32),label,fontname="LFMeta",fontsize=fs*.75)
-                    p.insert_text((x+label_width,y),text,fontname="LFMeta",fontsize=fs)
+                        draw(p,(x,y-fs*.32),label,fs*.75)
+                    draw(p,(x+label_width,y),text,fs)
                     y += fs*spacing
                 overlay.subset_fonts()
-                return overlay.tobytes(), dict(size=fs,rows=len(rows))
+                return overlay.tobytes(), dict(size=fs,rows=len(rows), font_policy=resolver.report() if resolver else {})
     return None
 
 
@@ -138,7 +151,8 @@ def repair_frontmatter(source, page, translator):
                     translator.location = f"PDF 第 {source.number+1} 页 · {kind} {label}"
                     value = translator.translate_fragment(text, "Academic front matter. Preserve institution names, addresses, postal codes and copyright identifiers.",part=kind)
                 texts.append((label,value))
-            fitted = centered_overlay(page,plan,texts,translator.job.target,translator.control)
+            fitted = centered_overlay(page,plan,texts,translator.job.target,translator.control,
+                                      (getattr(translator.job,"chinese_font",""), getattr(translator.job,"latin_font","")))
             if not fitted:
                 raise DocumentError(f"[论文信息排版失败] 第 {source.number+1} 页 {kind}：无法在原页安全区域内完整排入。译文缓存已保留。")
             return fitted

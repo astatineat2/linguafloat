@@ -63,14 +63,14 @@ def sign(payload: bytes) -> bytes:
 def write_source(output: Path):
     """An allowlist, not a copy of the working directory or development Git history."""
     inputs = [(ROOT / "src", "src"), (ROOT / "tests", "tests"), (ROOT / "photo", "photo"), (ROOT / "release", "release"),
-              (ROOT / "LICENSES", "LICENSES"), (ROOT / "docs/public", "docs"),
+              (ROOT / "LICENSES", "LICENSES"), (ROOT / "docs/public", "docs/public"),
               (ROOT / "source-materials", "source-materials")]
     fixed = ["pyproject.toml", "LinguaFloat.spec", "LinguaFloatUpdater.spec", "LICENSE", "THIRD_PARTY_NOTICES.md",
              "app-requirements.lock.txt", "document-requirements.lock.txt"]
     build_scripts = ["build_documents.ps1", "build.ps1", "check_build.py", "prepare_document_runtime.py",
                      "prepare_assets.py", "document_worker_entry.py", "updater_entry.py", "collect_licenses.py",
                      "publish_portable.py", "release_tools.py", "github_publish.py", "complete_release_sources.py",
-                     "finalize_release_inventory.py"]
+                     "finalize_release_inventory.py", "build_distribution.py", "build_installer.ps1"]
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         archive.writestr("SOURCE-REVISION.txt", "LinguaFloat v" + __version__ + "\n" +
                          subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() + "\n")
@@ -82,6 +82,8 @@ def write_source(output: Path):
             archive.write(ROOT / name, name)
         for name in build_scripts:
             archive.write(ROOT / "scripts" / name, "scripts/" + name)
+        for name in ("LinguaFloat.iss", "README.md"):
+            archive.write(ROOT / "scripts/installer" / name, "scripts/installer/" + name)
         archive.write(ROOT / "docs/public/开发与构建.md", "README.md")
 
 

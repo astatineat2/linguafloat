@@ -47,6 +47,7 @@ class PerformanceLog:
         self.stage_started = self.started
         self.phases = defaultdict(float)
         self.operations = defaultdict(float)
+        self.page_operations = defaultdict(lambda: defaultdict(float))
         self.counts = defaultdict(int)
         self.persist = None
         self.persisted_at = self.started
@@ -59,6 +60,8 @@ class PerformanceLog:
                 name = event["name"]
                 self.operations[name] += max(0, event["seconds"])
                 self.counts[name] += event.get("amount", 1)
+                if isinstance(event.get("page"), int) and event['page'] > 0:
+                    self.page_operations[str(event['page'])][name] += max(0, event['seconds'])
                 return
             if event.get("type") == "progress" or event.get("type") == "activity" and event.get("stage"):
                 phase = event.get("stage", self.phase)
@@ -82,7 +85,8 @@ class PerformanceLog:
             return {"active_seconds": max(0, now - self.started),
                     "paused_seconds": self.control.paused.elapsed(),
                     "phases": phases, "operations": dict(self.operations),
-                    "operation_counts": dict(self.counts)}
+                    "operation_counts": dict(self.counts),
+                    "page_operations": {page: dict(values) for page, values in self.page_operations.items()}}
 
 
 def duration_text(seconds):

@@ -108,7 +108,17 @@ def execute(job, key, store, control, emit, translator=None):
     output_root = Path(job.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     prefix = "试译版_" if job.trial else ""
-    target = output_root / (prefix + Path(job.source).stem[:60] + "." + job.job_id[:12])
+    supplement = ""
+    if job.workflow == "graphics":
+        from linguafloat.document_postprocess import validate_graphics_source
+        validate_graphics_source(store, job.parent_job_id, job.graphics_source,
+            source=job.source, provider=job.provider, job=job, control=control)
+        index = 1
+        label = "图片补译" if job.translate_figures and not job.translate_tables else "图表补译"
+        while any(output_root.glob(Path(job.source).stem[:60] + f".{label}-{index}.*")):
+            index += 1
+        supplement = f".{label}-{index}"
+    target = output_root / (prefix + Path(job.source).stem[:60] + supplement + "." + job.job_id[:12])
     if target.exists():
         raise DocumentError("输出任务目录已存在，请重新开始任务。")
     store.status(job, "running")
@@ -121,7 +131,7 @@ def execute(job, key, store, control, emit, translator=None):
             work = Path(temporary)
             emit({"type": "progress", "stage": "解析中", "value": None, "message": "解析文档"})
             extension = Path(job.source).suffix.lower()
-            if job.skip_references and extension not in {".docx", ".pptx"}:
+            if job.skip_references and job.workflow != "graphics" and extension not in {".docx", ".pptx"}:
                 from linguafloat.document_pdf import open_document
                 from linguafloat.document_references import pdf_boundary
                 with open_document(job.source) as document:
@@ -130,7 +140,10 @@ def execute(job, key, store, control, emit, translator=None):
                 emit({"type": "progress", "stage": "解析中", "value": None,
                       "message": (f"已定位第 {job.reference_boundary['page'] + 1} 页起的参考文献范围；后续章节继续翻译"
                                   if job.reference_boundary else "未确认参考文献区域；继续处理可识别内容")})
-            if extension == ".docx":
+            if job.workflow == "graphics":
+                from linguafloat.document_postprocess import translate_graphics_only
+                outputs, warnings = translate_graphics_only(job, translator, work, emit, store=store)
+            elif extension == ".docx":
                 from linguafloat.document_office import translate_docx
                 outputs, warnings = translate_docx(job, translator, work, emit)
             elif extension == ".pptx":
@@ -153,7 +166,7 @@ def execute(job, key, store, control, emit, translator=None):
             elif job.skip_references:
                 warnings.append("未可靠确认参考文献范围；这不代表文档没有参考文献，请核对输出中的相关内容。")
             control.checkpoint()
-            emit({"type": "progress", "stage": "保存中", "value": 95, "message": "校验并保存输出文件"})
+            emit({"type": "progress", "stage": "保存中", "value": None, "message": "校验并保存输出文件"})
             if len(outputs) != int(job.mono) + int(job.bilingual):
                 raise DocumentError("输出文件不完整，未发布结果。")
             for path in outputs:
@@ -167,7 +180,8 @@ def execute(job, key, store, control, emit, translator=None):
             # Publish the complete set together; never modify the original file.
             publish = work / "publish"
             publish.mkdir()
-            names = [prefix + Path(path).name for path in outputs]
+            names = [prefix + (Path(path).stem + supplement + Path(path).suffix if supplement else Path(path).name)
+                     for path in outputs]
             for path, name in zip(outputs, names):
                 shutil.copy2(path, publish / name)
             if (work / "reference-skip.json").is_file():
@@ -203,6 +217,15 @@ def execute(job, key, store, control, emit, translator=None):
                 issue.setdefault("stage", "识别/排版")
                 issue.setdefault("fallback", "保留原文")
                 issue.setdefault("retry_result", "未追加请求")
+            from linguafloat.document_postprocess import FOLDER
+            artifact = Path(job.graphics_source) if job.workflow == "graphics" else work / FOLDER
+            if artifact.is_dir() and (artifact / "manifest.json").is_file():
+                shutil.copytree(artifact, publish / FOLDER)
+                if job.workflow == "body":
+                    manifest_path = publish / FOLDER / "manifest.json"
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest["body_issues"] = local_issues
+                    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             if local_issues:
                 try:
                     (publish / "未翻译问题.jsonl").write_text("\n".join(json.dumps(dict(
@@ -214,19 +237,38 @@ def execute(job, key, store, control, emit, translator=None):
                 except OSError:
                     warnings.append("未翻译问题日志写入失败；位置及原因仍保留在任务历史中。")
             (publish / "performance.json").write_text(json.dumps(emit.summary(), ensure_ascii=False, indent=2), encoding="utf-8")
+            evidence = {}
+            for name in ("source_context", "graphic_context"):
+                context = getattr(translator, name, None)
+                if callable(getattr(context, "export_evidence", None)):
+                    evidence[name] = context.export_evidence()
+            if evidence:
+                (publish / "terminology-evidence.json").write_text(
+                    json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+            from linguafloat.document_postprocess import digest as artifact_digest
+            artifact_manifest = publish / FOLDER / "manifest.json"
+            graphics_manifest_sha256 = artifact_digest(artifact_manifest) if artifact_manifest.is_file() else ""
             control.checkpoint()
             publish.rename(target)
             paths = [str(target / name) for name in names]
         unresolved = len(local_issues)
+        transport_partial = getattr(translator, 'graphic_failure', None) is not None
+        if transport_partial:
+            warnings.append('部分完成：图表连接重试已耗尽，已停止剩余图表请求。正文及成功图文已保存，未完成区域保留原文并标记；请主动重试补译。')
         issues = [f"{r['id']} · " + (f"第 {r['page']} 页" if "page" in r else
                   f"{r.get('location', '文档')} 第 {r.get('paragraph', '?')} 段") + " · " + r["reason"] for r in local_issues]
         result = {"outputs": paths, "warnings": warnings, "untranslated_regions": unresolved,
+                  "parent_job_id": job.parent_job_id,
+                  "graphics_source": str(target / FOLDER) if (target / FOLDER).is_dir() else "",
+                  "graphics_manifest_sha256": graphics_manifest_sha256,
+                  "workflow": job.workflow,
+                  "transport_partial": transport_partial,
                   "issues": issues,
                   "local_failures": local_issues,
                   "reference_boundary": job.reference_boundary,
                   "requests": translator.calls, "cache_hits": translator.hits,
                   "performance": emit.summary(), "usage": getattr(translator, "token_usage", {})}
-        store.status(job, "completed", result)
+        store.status(job, "partial" if transport_partial else "completed", result)
         row = store.db.execute("SELECT details FROM jobs WHERE id=?", (job.job_id,)).fetchone()
         result["elapsed_seconds"] = json.loads(row[0]).get("elapsed_seconds")
         emit({"type": "finished", **result})
@@ -248,6 +290,8 @@ def main():
         if event.get("stage"):
             stage = event["stage"]
         with lock:
+            if job is not None:
+                event = {**event, "job_id": job.job_id}
             protocol.write(json.dumps(event, ensure_ascii=False) + "\n")
             protocol.flush()
 

@@ -461,7 +461,10 @@ def test_actual_scan_flow_preserves_references_and_translates_appendix(tmp_path)
         for number, page in enumerate(mono, 1):
             markers = [drawing for drawing in page.get_drawings()
                        if drawing.get("color") == pytest.approx((.85, .05, .05), abs=.001)]
-            assert len(markers) == sum(page_number == number for page_number, _ in regions)
+            # Safety markers use disjoint white-space segments, not a rectangle
+            # over source ink. Check actual segments against the recorded count.
+            assert len(markers) == sum(region['outline_segments'] for page_number, region in regions
+                                       if page_number == number)
         for page, region in regions:
             issue = next(item for item in issues if item["id"] == region["id"])
             assert region["status"] == issue["status"] == "untranslated"
@@ -471,9 +474,12 @@ def test_actual_scan_flow_preserves_references_and_translates_appendix(tmp_path)
             assert issue["reason"] == region["reason"] and region["reason"]
             assert region["id"] in "".join(mono[page - 1].get_text().split())
             outline = (fitz.Rect(region["box"]) + (-1, -1, 1, 1)) & mono[page - 1].rect
-            assert any(tuple(drawing["rect"]) == pytest.approx(tuple(outline), abs=.01)
-                       and drawing.get("color") == pytest.approx((.85, .05, .05), abs=.001)
-                       for drawing in mono[page - 1].get_drawings())
+            edges = [d for d in mono[page-1].get_drawings()
+                     if d.get('color') == pytest.approx((.85,.05,.05),abs=.001)
+                     and all(outline.x0-.01 <= point.x <= outline.x1+.01
+                             and outline.y0-.01 <= point.y <= outline.y1+.01
+                             for item in d['items'] for point in item[1:] if isinstance(point,fitz.Point))]
+            assert len(edges) >= region['outline_segments'] > 0
         for box in job.reference_boundary["page_boxes"]["0"]:
             clip = fitz.Rect(box)
             assert mono[0].get_pixmap(clip=clip).samples == source[0].get_pixmap(clip=clip).samples

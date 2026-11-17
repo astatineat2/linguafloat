@@ -43,7 +43,7 @@ def test_document_preferences_restart_without_task_options(controller,tmp_path):
     restored.close()
 
 
-def test_merged_toggle_task_snapshot_and_current_provider(controller,tmp_path,monkeypatch):
+def test_legacy_toggle_does_not_enable_graphics_in_new_body_task(controller,tmp_path,monkeypatch):
     c,_,store=controller;page=c.window.documents
     page.translate_graphics.setChecked(True)
     source=tmp_path/"paper.pdf";source.touch();page.add_files([str(source)])
@@ -52,7 +52,8 @@ def test_merged_toggle_task_snapshot_and_current_provider(controller,tmp_path,mo
     c.documents.start()
     assert len(c.documents.queue)==1
     job=c.documents.queue[0][0]
-    assert job.translate_tables and job.translate_figures and job.request_timeout==250
+    assert job.translate_tables and not job.translate_figures and job.request_timeout==250
+    assert job.workflow == 'body'
     assert job.provider["model"]=="test-model" and not job.pricing
     profile.model="changed-after-start";profile.document_timeout=300
     c.window.set_active_profile("second")
@@ -62,7 +63,7 @@ def test_merged_toggle_task_snapshot_and_current_provider(controller,tmp_path,mo
     page.translate_graphics.setChecked(False)
     c.documents.start()
     job=c.documents.queue[0][0]
-    assert job.provider["model"]=="second-model" and not job.translate_tables and not job.translate_figures
+    assert job.provider["model"]=="second-model" and job.translate_tables and not job.translate_figures
     c.documents.queue.clear();page.set_busy(False)
 
 
@@ -83,7 +84,8 @@ def test_graphics_option_does_not_block_office_in_mixed_batch(controller,tmp_pat
     c.documents.start()
     jobs=[job for job,_,_ in c.documents.queue]
     assert len(jobs)==3
-    assert [(job.translate_tables,job.translate_figures) for job in jobs]==[(True,True),(False,False),(False,False)]
+    assert [(job.translate_tables,job.translate_figures) for job in jobs]==[(True,False),(False,False),(False,False)]
+    assert jobs[0].workflow == 'body'
     c.documents.queue.clear();page.set_busy(False)
 
 

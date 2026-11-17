@@ -302,7 +302,7 @@ def test_retries_are_bounded_and_structured_requests_are_not_split(tmp_path, cod
     counts = [e["name"] for e in events if e.get("type") == "measurement"]
     assert counts.count("请求重试") == expected_calls - 1
     if code in {429, 504}:
-        assert t.gate.limit == 1
+        assert t.gate.limit == (1 if code == 429 else 6 - expected_calls)
         assert counts.count("HTTP 429 限流" if code == 429 else "请求超时") == expected_calls
     assert t.token_usage["unreported_requests"] == expected_calls
     assert t.gate.inflight == 0

@@ -91,7 +91,7 @@ def presets_for(kind, profiles=(), *, confirmed_names=()):
         # This public endpoint already exists in the OpenCode service adapter.
         # Published choices do not guarantee entitlement for a particular account.
         presets.append(ProviderPreset("OpenCode Go", "https://opencode.ai/inference/go/openai/v1",
-                                      "chat_completions", GO_MODELS[0], GO_MODELS))
+                                      "responses", GO_MODELS[0], GO_MODELS))
     if not presets and kind == "no_coding":
         presets.append(ProviderPreset("Now Coding", "https://nowcoding.ai/v1", "responses",
                                       NOW_CODING_MODELS[0], NOW_CODING_MODELS))

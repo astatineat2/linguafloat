@@ -109,6 +109,7 @@ class Workbench(QWidget):
 
 class AppDialog(QDialog):
     """Common heading, Chinese standard actions and safe keyboard defaults."""
+    header_close_visible = True
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(APP_STYLESHEET)
@@ -201,13 +202,14 @@ class AppDialog(QDialog):
             self.dialog_heading.setTextFormat(Qt.TextFormat.PlainText)
             self.windowTitleChanged.connect(self.dialog_heading.setText)
             row.addWidget(self.dialog_heading, 1)
-            close = QToolButton()
-            close.setIcon(icon("close"))
-            close.setToolTip("关闭")
-            close.setAccessibleName("关闭弹窗")
-            close.setFixedSize(32, 32)
-            close.clicked.connect(self.reject)
-            row.addWidget(close)
+            if self.header_close_visible:
+                close = QToolButton()
+                close.setIcon(icon("close"))
+                close.setToolTip("关闭")
+                close.setAccessibleName("关闭弹窗")
+                close.setFixedSize(32, 32)
+                close.clicked.connect(self.reject)
+                row.addWidget(close)
             layout.insertWidget(0, header)
             for button in self.findChildren(QPushButton):
                 button.setAutoDefault(False)

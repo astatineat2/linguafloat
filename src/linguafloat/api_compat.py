@@ -293,7 +293,43 @@ def error_details(exc, profile=None, *, key="", source_texts=(), request_id=None
         details.update(api_mode=field(profile, "api_mode"), model=safe_text(field(profile, "model", ""), secrets=(key,)))
     if code is not None:
         details["http_status"] = code
-    identity = getattr(exc, "request_id", None) or request_id
+    if request_id:
+        details["local_request_id"] = request_id
+    # Keep only exception class names, never exception text/URLs or request headers.
+    cause = exc.__cause__ or exc.__context__
+    chain = []
+    system_codes, windows_codes, ssl_reasons = [], [], []
+    for _ in range(5):
+        if cause is None or id(cause) in [item[0] for item in chain]:
+            break
+        chain.append((id(cause), type(cause).__name__))
+        for attr, values in (('errno', system_codes), ('winerror', windows_codes)):
+            value = getattr(cause, attr, None)
+            if type(value) is int and value not in values:
+                values.append(value)
+        # Fixed SSL reason identifiers are useful; arbitrary exception bodies
+        # can contain private URLs, credentials or document text and are omitted.
+        import ssl
+        if isinstance(cause, ssl.SSLError):
+            value = getattr(cause, 'reason', None)
+            if isinstance(value, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{1,80}', value):
+                ssl_reasons.append(value)
+        cause = cause.__cause__ or cause.__context__
+    if chain:
+        details["cause_types"] = [name for _, name in chain]
+        details["transport_error_type"] = chain[0][1]
+        phases = {"ConnectTimeout": "connect", "ReadTimeout": "read", "WriteTimeout": "write", "PoolTimeout": "pool"}
+        for _, name in chain:
+            if name in phases:
+                details["timeout_phase"] = phases[name]
+                break
+    if system_codes:
+        details['system_error_codes'] = system_codes
+    if windows_codes:
+        details['windows_error_codes'] = windows_codes
+    if ssl_reasons:
+        details['ssl_reasons'] = list(dict.fromkeys(ssl_reasons))
+    identity = getattr(exc, "request_id", None)
     if identity:
         details["supplier_request_id"] = safe_text(identity, secrets=(key,), source_texts=source_texts, limit=100)
     body = getattr(exc, "body", None)
@@ -324,9 +360,13 @@ def error_details(exc, profile=None, *, key="", source_texts=(), request_id=None
     if profile is not None:
         name = safe_text(field(profile, "name", "当前供应商"), secrets=(key,))
         parts.append(f"供应商：{name} · 接口：{details['api_mode']} · 模型：{details['model']}")
-    labels = {"reason": "原因", "supplier_error_type": "供应商错误类型", "supplier_error_code": "错误代码",
+    labels = {"reason": "原因", "transport_error_type": "底层异常", "timeout_phase": "超时环节",
+              "supplier_error_type": "供应商错误类型", "supplier_error_code": "错误代码",
               "parameter": "相关参数", "supplier_request_id": "供应商请求编号"}
     parts.extend(f"{label}：{details[k]}" for k, label in labels.items() if details.get(k))
+    for name, title in (('system_error_codes','系统错误码'),('windows_error_codes','Windows 错误码'),('ssl_reasons','TLS 原因')):
+        if details.get(name):
+            parts.append(title + '：' + ', '.join(str(v) for v in details[name]))
     if code and not details.get("reason"):
         parts.append("供应商未提供可安全展示的具体原因；当前不能确定是模型、参数还是接口限制。")
     return "\n".join(parts), details

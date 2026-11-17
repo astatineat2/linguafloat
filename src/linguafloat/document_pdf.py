@@ -94,11 +94,22 @@ class DocumentOcr:
             result = SimpleNamespace(txts=recognition.txts, scores=recognition.scores,
                                      boxes=boxes, word_results=recognition.word_results)
         else:
-            result = self.engine(image[:, :, ::-1].copy(), **options)
+            # RapidOCR keeps per-call flags on the engine. Graphic ratio
+            # probes use recognition without detection on this same instance.
+            from linguafloat.document_ocr import DocumentRapidOCR
+            if isinstance(self.engine, DocumentRapidOCR):
+                result = self.engine(image[:, :, ::-1].copy(), use_det=True,
+                                     use_cls=self.engine.cfg.Global.use_cls, use_rec=True,
+                                     return_word_box=words)
+            else:
+                result = self.engine(image[:, :, ::-1].copy(), **options)
         self.measure("OCR 文字识别", started)
         if positioned:
-            if result.txts is None or result.boxes is None:
+            if not getattr(result, "txts", None):
                 return []
+            if (getattr(result, "boxes", None) is None or getattr(result, "scores", None) is None
+                    or len(result.txts) != len(result.boxes) or len(result.txts) != len(result.scores)):
+                raise DocumentError("[文档 OCR 数据不完整] 定位识别缺少文字框或置信度；未按无文字处理。")
             def coordinates(box):
                 box = np.asarray(box)
                 return [(float(box[:, 0].min()) + pix.x) / scale,
@@ -110,7 +121,7 @@ class DocumentOcr:
                                          max(2, abs(float(box[1, 0] - box[0, 0])) * .035)))
                     for text, score, box in zip(result.txts, result.scores, result.boxes) if text.strip()]
             if words:
-                for line, word_line in zip(lines, result.word_results or ()):
+                for line, word_line in zip(lines, getattr(result, "word_results", ()) or ()):
                     line["words"] = [dict(text=t, confidence=float(s), box=coordinates(b))
                                      for t, s, b in word_line if b is not None and t.strip()]
             return lines
@@ -187,6 +198,15 @@ def append_bilingual(dual, source, number, fragment, arrangement):
             # Blank pages have no content stream and cannot be shown with show_pdf_page.
             if document[page_no].get_contents():
                 sheet.show_pdf_page(rect, document, page_no)
+            # show_pdf_page copies drawing operators, not link annotations.
+            # These panels use the native page size; external destinations stay exact.
+            page = document[page_no]
+            for link in page.get_links():
+                if link.get("kind") == fitz.LINK_URI and link.get("uri"):
+                    # get_links() already returns rotated page coordinates.
+                    box = fitz.Rect(link["from"])
+                    box += (rect.x0, rect.y0, rect.x0, rect.y0)
+                    sheet.insert_link({"kind": fitz.LINK_URI, "from": box, "uri": link["uri"]})
 
 
 def check_layout_paragraph(paragraph, characters, page_number=None):
@@ -488,7 +508,10 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
         all_pages = selected_pages(job.pages, len(document), job.trial)
         pages = [p for p in all_pages if not reference_page_only(job.reference_boundary if job.skip_references else {}, p)]
     if not pages:
-        return (assemble_layout_pdf(job, all_pages, job.source, output, {}, translator.control),
+        from linguafloat.document_postprocess import save_body_artifact
+        checkpoint = (lambda body, mapping: save_body_artifact(output, job, body, mapping, translator)) if job.workflow == "body" else None
+        return (assemble_layout_pdf(job, all_pages, job.source, output, {}, translator.control,
+                                   body_checkpoint=checkpoint),
                 ["所选页面均在已确认的参考文献范围内，保留原页，未请求翻译。"])
     started = active_clock(translator.control)
     policy = LayoutPolicy(translator.control, job.source, set(pages), translator=translator)
@@ -512,14 +535,15 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
     enhancer = DocumentEnhancer(translator,emit)
     graphic_key=""
     if enhancer.analyzer:
-        from linguafloat.document_graphics import SCHEMA
-        graphic_key=f"-{SCHEMA}-t{int(job.translate_tables)}-f{int(job.translate_figures)}"
+        from linguafloat.document_graphics import PROTECTION_SCHEMA
+        graphic_key=f"-{PROTECTION_SCHEMA}-t{int(job.translate_tables or job.workflow == 'body')}-f{int(job.translate_figures)}"
         with open_document(job.source) as document:
             for number in pages:
-                areas=enhancer.analyzer.discover(document[number],enhancer.digest)
+                areas=enhancer.analyzer.protection_regions(document[number],enhancer.digest,
+                                                           translate_tables=job.translate_tables or job.workflow == "body")
                 from linguafloat.document_references import boundary_intersects
-                enabled=[a for a in areas if (job.translate_tables if a["kind"]=="table" else job.translate_figures)
-                         and not boundary_intersects(job.reference_boundary if job.skip_references else {}, number, a["box"])]
+                enabled=[a for a in areas if not boundary_intersects(
+                    job.reference_boundary if job.skip_references else {}, number, a["box"])]
                 policy.graphic_regions[number]=enabled
                 height=document[number].rect.height
                 for area in enabled:
@@ -528,8 +552,8 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
     emit({"type": "measurement", "name": "原文布局保护索引", "seconds": active_clock(translator.control) - started})
     from linguafloat.document_artifacts import LayoutSnapshot
     snapshot = LayoutSnapshot(translator.store.path.parent, job, pages,
-                              policy_key="variable-rules-v2-context-v1-"+("scientific-v4" if policy.scientific.affected else "")+graphic_key+
-                              ("-bibliography-only-v3-"+hashlib.sha256(json.dumps(job.reference_boundary,sort_keys=True).encode()).hexdigest()
+                              policy_key="source-columns-v1-richtext-v4-quantity-v2-native-structure-v3-figure-protection-v2-context-v1-"+("scientific-v6" if policy.scientific.affected else "")+graphic_key+
+                              ("-bibliography-only-v4-"+hashlib.sha256(json.dumps(job.reference_boundary,sort_keys=True).encode()).hexdigest()
                                if job.skip_references else ""))
     settings = SettingsModel.model_validate({
         "translation": {"lang_in": "zh" if job.source_language == "zh-Hans" else job.source_language,
@@ -555,6 +579,11 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
         try:
             return original_request(messages, **kwargs)
         except Exception as exc:
+            from linguafloat.document_core import recoverable_transport
+            if kwargs.get('recover_transport') and recoverable_transport(exc):
+                # This exception belongs to the explicitly recoverable graph
+                # pass after prose, not the body engine's fatal failure list.
+                raise
             from linguafloat.document_failures import require_local
             try:
                 require_local(exc)
@@ -606,10 +635,16 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
         path = getattr(final, "no_watermark_mono_pdf_path", None) or getattr(final, "mono_pdf_path", None)
         if not path or not Path(path).is_file():
             raise DocumentError("PDF 引擎未生成完整译文。")
-        emit({"type": "progress", "stage": "保存中", "stage_key": "assemble", "value": 95, "message": "生成单语和双语输出"})
+        emit({"type": "progress", "stage": "保存中", "stage_key": "assemble", "value": None, "message": "逐页恢复原文并生成输出"})
         return assemble_layout_pdf(job, all_pages, path, output, policy.continuation_indices,
                                    translator.control, policy.margin_references, policy.continuation_layout,
-                                   policy.retained_regions, None if defer_graphics else enhancer.apply)
+                                   policy.retained_regions,
+                                   lambda source,target: enhancer.apply(source,target,graphics=not defer_graphics), emit=emit,
+                                   body_checkpoint=body_checkpoint if job.workflow == "body" else None)
+    def body_checkpoint(body, page_map):
+        from linguafloat.document_postprocess import save_body_artifact
+        save_body_artifact(output, job, body, page_map, translator)
+
     # This worker already provides process isolation and cancellation. Avoid the
     # engine spawning more Python processes for saving/subsetting on Windows.
     original_save = PDFCreater.save_pdf_with_timeout
@@ -730,9 +765,14 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
     babel._do_translate_single = single
     babel.fix_media_box = remember_boxes
     try:
-        with policy:
-            paths = run()
+        from linguafloat.document_fonts import BabelDOCFontPolicy
+        with BabelDOCFontPolicy(job.chinese_font, job.latin_font) as fonts:
+            with policy:
+                paths = run()
         report = {"minimum_body_pt": 6, "paragraphs": policy.records, "warnings": policy.warnings,
+             "font_policy": fonts.report(), "render_policy_key": snapshot.render_key,
+             "normal_preserved_regions": {number: [r for r in regions if r.get("kind") == "graphic_source"]
+                                          for number, regions in policy.retained_regions.items()},
              "reference_boundary": job.reference_boundary,
              "geometry_repairs": policy.geometry_repairs,
              "continuations": dict(policy.continuation_indices),
@@ -829,19 +869,46 @@ def append_packed_continuations(fragment, rendered, number, indices, layout, con
 
 
 def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices, control, margin_references=None,
-                        continuation_layout=None, retained_regions=None, enhance=None):
+                        continuation_layout=None, retained_regions=None, enhance=None, emit=None, body_checkpoint=None):
     """Group each translated page and its continuations with the correct original."""
     import pymupdf as fitz
+    from linguafloat.document_metrics import active_clock
+    def progress(message, number=None):
+        control.checkpoint()
+        if emit:
+            emit({"type": "progress", "stage": "保存中", "stage_key": "assemble", "value": None,
+                  "message": message, "page": None if number is None else number + 1})
+
+    def measured(name, started, number=None):
+        if emit:
+            emit({"type": "measurement", "name": name, "seconds": active_clock(control) - started,
+                  "page": None if number is None else number + 1})
     paths = []
+    page_map = []
     with open_document(job.source) as source, fitz.open(rendered_path) as rendered, fitz.open() as mono, fitz.open() as dual:
-        for number in pages:
+        publication = {}
+        if job.target == 'zh-Hans' and getattr(job,'chinese_font','') and getattr(job,'latin_font',''):
+            from linguafloat.document_publication import repair_dates, repair_author_identifiers
+            for number in pages:
+                control.checkpoint()
+                details=[]
+                dates=repair_dates(source[number],rendered[number],(job.chinese_font,job.latin_font))
+                if dates:details.extend(dates)
+                contacts=repair_author_identifiers(source[number],rendered[number],(job.chinese_font,job.latin_font))
+                if contacts:details.extend(contacts)
+                if details:publication[number]=dict(dates=dates,contacts=contacts)
+        for ordinal, number in enumerate(pages, 1):
             control.checkpoint()
+            page_started = active_clock(control)
+            progress(f"恢复与合成第 {ordinal}/{len(pages)} 页（原始第 {number + 1} 页）", number)
             if reference_page_only(job.reference_boundary if job.skip_references else {}, number):
                 with fitz.open() as fragment:
                     fragment.insert_pdf(source, from_page=number, to_page=number)
+                    page_map.append(dict(source=number, start=len(mono), count=len(fragment), selected=False))
                     mono.insert_pdf(fragment)
                     if job.bilingual:
                         append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+                measured("输出页面合成", page_started, number)
                 continue
             with fitz.open() as fragment:
                 indices = continuation_indices.get(number, [])
@@ -855,9 +922,14 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                         fragment.insert_pdf(rendered, from_page=index, to_page=index)
                 if layout is not None:
                     append_packed_continuations(fragment, rendered, number, indices, layout, control)
+                started = active_clock(control)
                 for region in (retained_regions or {}).get(number, []):
                     control.checkpoint()
                     original = source[number]
+                    if publication.get(number,{}).get('contacts'):
+                        from linguafloat.document_publication import is_replaced_identifier
+                        if is_replaced_identifier(original,region,publication[number]['contacts']):
+                            continue
                     rect = fitz.Rect(region["box"]) * original.transformation_matrix * original.rotation_matrix
                     rect &= original.rect
                     if rect.is_empty or fragment[0].rect != original.rect:
@@ -873,19 +945,59 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                         fragment[0].add_redact_annot(rect, fill=(1,1,1), cross_out=False)
                         fragment[0].apply_redactions(images=0, graphics=0, text=0)
                     fragment[0].show_pdf_page(rect, source, number, clip=rect)
+                measured("局部原文恢复", started, number)
                 if enhance:
                     enhance(source[number],fragment[0])
+                if publication.get(number,{}).get('contacts'):
+                    for link in source[number].get_links():
+                        if link.get('kind') != fitz.LINK_URI or not link.get('uri'):
+                            continue
+                        uri=link['uri']
+                        if uri.startswith('mailto:'):
+                            found=fragment[0].search_for(uri[7:])
+                            if len(found)==1:
+                                fragment[0].insert_link({'kind':fitz.LINK_URI,'from':found[0],'uri':uri})
+                        elif uri.startswith('https://') and 'orcid.org/' not in uri:
+                            native=source[number].get_textbox(fitz.Rect(link['from'])).strip()
+                            if native.startswith('https://'):
+                                found=fragment[0].search_for(native)
+                                if len(found)==1:
+                                    fragment[0].insert_link({'kind':fitz.LINK_URI,'from':found[0],'uri':uri})
+                started = active_clock(control)
                 if job.skip_references and reference_boxes(job.reference_boundary, number):
                     from linguafloat.document_references import retain_pdf_tail
                     retain_pdf_tail(fragment[0], source[number], dict(boxes=reference_boxes(job.reference_boundary, number)))
+                measured("参考文献原文恢复", started, number)
                 from linguafloat.document_failures import mark_pdf
-                mark_pdf(fragment[0], (retained_regions or {}).get(number, []), number)
+                progress(f"定位未翻译标记 · 第 {ordinal}/{len(pages)} 页", number)
+                started = active_clock(control)
+                mark_pdf(fragment[0], (retained_regions or {}).get(number, []), number, control=control)
+                measured("未翻译区域标记", started, number)
+                started = active_clock(control)
+                page_map.append(dict(source=number, start=len(mono), count=len(fragment), selected=True))
                 mono.insert_pdf(fragment)
                 if job.bilingual:
                     append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+                contacts=publication.get(number,{}).get('contacts',[])
+                if contacts:
+                    from linguafloat.document_publication import draw_author_identifiers
+                    fonts=(job.chinese_font,job.latin_font)
+                    draw_author_identifiers(mono[page_map[-1]['start']],contacts,fonts)
+                    if job.bilingual:
+                        first=len(dual)-len(fragment)
+                        offset=((0,0) if job.bilingual_layout=='alternating' else
+                                (source[number].rect.width+20,26))
+                        draw_author_identifiers(dual[first],contacts,fonts,offset=offset)
+                measured("单语与双语页面合成", started, number)
+                measured("输出页面合成", page_started, number)
+        if body_checkpoint:
+            body_checkpoint(mono, page_map)
         for enabled, label, document in ((job.mono, "译文", mono), (job.bilingual, "双语", dual)):
             if enabled:
                 target = output / f"{Path(job.source).stem}.{label}.pdf"
+                progress(f"整理 PDF 资源并写入{label}文件")
+                started = active_clock(control)
                 document.save(str(target), garbage=4, deflate=True)
+                measured(f"{label}资源整理及写入", started)
                 paths.append(str(target))
     return paths

@@ -133,6 +133,16 @@ def test_report_uses_one_page_key_for_old_and_new_unresolved_regions():
     assert len(json.loads(json.dumps(report))['untranslated_regions']['1'])==2
 
 
+def test_enhancer_without_cache_adapter_still_initializes_lazy_protection(tmp_path):
+    from linguafloat.document_graphics import source_digest
+    path, _, _ = fixture(tmp_path)
+    t = NS(job=NS(source=path, translate_figures=False, translate_tables=False), control=JobControl())
+    enhancer = DocumentEnhancer(t, lambda _: None)
+    assert enhancer.digest == source_digest(path)
+    assert enhancer.analyzer.store is None
+    assert enhancer.analyzer.model is None and enhancer.analyzer.ocr.engine is None
+
+
 def test_metadata_matching_does_not_remove_adjacent_body():
     plans=[dict(box=[30,40,470,80])]
     assert paragraph_in_plan(NS(box=NS(x=80,y=225,x2=400,y2=255)),300,plans)
@@ -150,7 +160,7 @@ def test_hidden_ocr_is_not_preferred_over_visible_scan():
 def test_local_preview_manual_translation_keeps_unfilled_regions_without_api(tmp_path,monkeypatch):
     path,region,analyzer=fixture(tmp_path)
     from linguafloat.document_graphics import source_digest
-    monkeypatch.setattr(GraphicAnalyzer,'discover',analyzer.discover)
+    monkeypatch.setattr(GraphicAnalyzer,'discover',lambda *args, **kwargs: analyzer.discover(*args))
     events=[]
     preview_page(dict(source=str(path),page=0,database=str(tmp_path/'preview.sqlite'),manual_preview=True,
                       overrides={source_digest(path):{'label':{'translation':'外径'}}}),events.append)

@@ -33,7 +33,8 @@ def diagnostic(error, stage):
     reason = next((v for k, v in codes.items() if k in str(error)),
                   f"{stage}发生 {type(error).__name__}，已保留原文；代码位置见问题日志")
     specifics = ("片段译文不是文字", "片段返回空译文", "片段夹带公式标记",
-                 "片段格式标签丢失、增加或顺序变化", "片段小数、百分比或数量级发生变化",
+                 "片段格式标签丢失、增加或顺序变化", "片段格式标签丢失、增加或嵌套关系变化", "片段小数、百分比或数量级发生变化",
+                 "片段正文数值发生变化",
                  "补译响应不是有效 JSON", "片段数量不匹配", "片段编号缺失、重复或不匹配",
                  "单片段补译未返回纯文本")
     reason += next(("：" + value for value in specifics if value in str(error)), "")
@@ -43,9 +44,44 @@ def diagnostic(error, stage):
                 fallback="保留原文", trace=failure_trace(error))
 
 
-def mark_pdf(page, regions, page_number):
-    """Paint persistent outlines and labels only in verified blank space."""
+def mark_pdf(page, regions, page_number, control=None):
+    """Draw in unrotated PDF coordinates, restoring the display rotation."""
+    if control:
+        control.checkpoint()
+    rotation = page.rotation
+    try:
+        if rotation:
+            page.set_rotation(0)
+        return _mark_unrotated_pdf(page, regions, page_number, control)
+    finally:
+        if rotation:
+            page.set_rotation(rotation)
+
+
+def _mark_unrotated_pdf(page, regions, page_number, control=None):
+    """Inspect one immutable page snapshot; track subsequent paint separately.
+
+    Rebuilding a display list for every margin candidate is very expensive on
+    vector plots. The snapshot lives only for this call, after source recovery.
+    Reserved outline strips and label rectangles account for all new paint.
+    """
     import pymupdf as fitz
+    active = [r for r in regions if r.get("kind") != "graphic_source" and r.get("status") != "preserved"]
+    if not active:
+        return
+    display = page.get_displaylist(annots=True)
+    if control:
+        control.checkpoint()
+    occupied = []
+    for region in active:
+        box = fitz.Rect(region["box"])
+        if region.get("coordinates", "bottom-left") == "bottom-left":
+            box = box * page.transformation_matrix * page.rotation_matrix
+        box = (box + (-1, -1, 1, 1)) & page.rect
+        occupied.extend((fitz.Rect(box.x0-1, box.y0-1, box.x1+1, box.y0+1),
+                         fitz.Rect(box.x0-1, box.y1-1, box.x1+1, box.y1+1),
+                         fitz.Rect(box.x0-1, box.y0, box.x0+1, box.y1),
+                         fitz.Rect(box.x1-1, box.y0, box.x1+1, box.y1)))
     for index, region in enumerate(regions, 1):
         if region.get("kind") == "graphic_source" or region.get("status") == "preserved":
             continue
@@ -58,22 +94,63 @@ def mark_pdf(page, regions, page_number):
             raise DocumentError("[未翻译区域坐标无效] 无法安全标记输出。")
         outline = (rect + (-1, -1, 1, 1)) & page.rect
         label = "未翻译 " + identity
-        width = 24 + len(identity) * 3.4
+        # insert_text's built-in CJK encoding uses fixed-width Latin glyphs too.
+        # Font.text_length uses proportional fallback widths and underestimates
+        # the actual marker, allowing it to paint into neighboring source ink.
+        width = fitz.get_text_length(label, fontname="china-s", fontsize=6) + 2
         candidates = [fitz.Rect(rect.x0, rect.y0 - 11, rect.x0 + width, rect.y0 - 2),
                       fitz.Rect(rect.x0, rect.y1 + 2, rect.x0 + width, rect.y1 + 11)]
         candidates.extend(fitz.Rect(3, y, width + 3, y + 9)
                           for y in range(3, int(page.rect.height) - 10, 12))
         for candidate in candidates:
-            if not page.rect.contains(candidate):
+            if control:
+                control.checkpoint()
+            if not page.rect.contains(candidate) or any(candidate.intersects(box) for box in occupied):
                 continue
-            pix = page.get_pixmap(clip=candidate, colorspace=fitz.csGRAY, alpha=False)
+            pix = display.get_pixmap(clip=candidate, colorspace=fitz.csGRAY, alpha=False)
             if pix.samples and min(pix.samples) >= 248:
                 page.insert_text((candidate.x0, candidate.y0 + 7), label,
                                  fontname="china-s", fontsize=6, color=(.8, .05, .05))
                 region["label_box"] = list(candidate)
+                occupied.append(candidate + (-1, -1, 1, 1))
                 break
-        page.draw_rect(outline, color=(.85, .05, .05), width=.7, overlay=True)
+        # OCR bounds can include descenders from the next label. A continuous
+        # expanded frame would paint over a protected name, rule or formula.
+        # Keep vector marker segments only where the immutable page is white.
+        region['outline_segments'] = _safe_outline(page, display, outline, control)
         region["marked"] = True
+
+
+def _safe_outline(page, display, rect, control=None):
+    import numpy as np
+    import pymupdf as fitz
+    count = 0
+    for horizontal, coordinate, start, end in (
+            (True,rect.y0,rect.x0,rect.x1),(True,rect.y1,rect.x0,rect.x1),
+            (False,rect.x0,rect.y0,rect.y1),(False,rect.x1,rect.y0,rect.y1)):
+        if control:
+            control.checkpoint()
+        # The guard is wider than the .7pt stroke, including antialiasing.
+        clip = (fitz.Rect(start-1,coordinate-1.5,end+1,coordinate+1.5) if horizontal else
+                fitz.Rect(coordinate-1.5,start-1,coordinate+1.5,end+1)) & page.rect
+        if clip.is_empty:
+            continue
+        # Thin strokes can disappear between samples at 2x. Inspect at 4x and
+        # require exact white, then inset a full point from occupied samples.
+        resolution = 4
+        pix = display.get_pixmap(matrix=fitz.Matrix(resolution,resolution),clip=clip,colorspace=fitz.csRGB,alpha=False)
+        rgb = np.frombuffer(pix.samples,dtype=np.uint8).reshape(pix.height,pix.width,3)
+        blank = np.all(rgb == 255,axis=(0,2) if horizontal else (1,2))
+        edges = np.flatnonzero(np.diff(np.r_[False,blank,False].astype(np.int8)))
+        origin = pix.x if horizontal else pix.y
+        for left,right in zip(edges[::2],edges[1::2]):
+            low,high = max(start,(origin+int(left))/resolution+1),min(end,(origin+int(right))/resolution-1)
+            if high <= low:
+                continue
+            a,b = ((low,coordinate),(high,coordinate)) if horizontal else ((coordinate,low),(coordinate,high))
+            page.draw_line(a,b,color=(.85,.05,.05),width=.7,overlay=True)
+            count += 1
+    return count
 
 
 def office_issue(translator, error, label, index):

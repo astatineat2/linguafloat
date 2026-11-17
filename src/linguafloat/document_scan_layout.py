@@ -325,10 +325,25 @@ def fit_translation(page, region, text, target, control):
     """Probe on disposable pages; no failed fit can leak partial glyphs."""
     import pymupdf as fitz
     from linguafloat.document_layout import font_scales
-    fontname = {"ja": "japan", "ko": "korea"}.get(target, "china-s")
-    font = fitz.Font(fontname)
-    if any(not font.has_glyph(ord(c)) for c in text if not c.isspace()):
-        return None
+    from linguafloat.document_graphics import graphic_font_resolver
+    from linguafloat.document_graphic_layout import GraphicFontMetrics
+    region.pop('_fit_failure', None)
+    resolver = region.get('_font_resolver') or graphic_font_resolver(
+        region.get('chinese_font', ''), region.get('latin_font', ''))
+    if resolver is not None:
+        # OCR supplies no reliable style evidence. Use the chosen regular faces;
+        # missing glyphs raise an explicit diagnostic instead of a fallback.
+        from linguafloat.document_fonts import FontPolicyError
+        try:
+            font = GraphicFontMetrics(resolver, text)
+        except FontPolicyError as error:
+            region['_fit_failure'] = str(error)
+            return None
+    else:
+        fontname = {"ja": "japan", "ko": "korea"}.get(target, "china-s")
+        font = fitz.Font(fontname)
+        if any(not font.has_glyph(ord(c)) for c in text if not c.isspace()):
+            return None
     lines = region["lines"]
     size = max(6, min(24, median(l["box"][3] - l["box"][1] for l in lines) * 1.25))
     # A searchable scan's invisible OCR font can have arbitrary metrics. Only
@@ -343,9 +358,18 @@ def fit_translation(page, region, text, target, control):
         if region.get("recovered") and len(lines) == 1 and "\n" not in text:
             fitted = fit_single_line(page, region, text, font, size * scale)
             if fitted:
-                return fitted, dict(size=size * scale, spacing=1, method="glyph_bounds")
+                metadata = dict(size=size * scale, spacing=1, method="glyph_bounds")
+                if resolver is not None:
+                    metadata['font_policy'] = resolver.report()
+                return fitted, metadata
         for spacing in (1.3, 1.2):
             control.checkpoint()
+            if resolver is not None:
+                fitted = fit_policy_paragraph(page, region, text, font, size * scale, spacing)
+                if fitted:
+                    return fitted, dict(size=size * scale, spacing=spacing,
+                                        font_policy=resolver.report())
+                continue
             with fitz.open() as probe:
                 trial = probe.new_page(width=page.rect.width, height=page.rect.height)
                 trial.insert_font(fontname="LFScan", fontbuffer=font.buffer)
@@ -357,6 +381,42 @@ def fit_translation(page, region, text, target, control):
     return None
 
 
+def draw_scan_line(page, origin, text, font, size):
+    """Use the same face runs as measurement; leave legacy drawing unchanged."""
+    if hasattr(font, 'resolver'):
+        font.resolver.draw_line(page, origin, text, fontsize=size, color=(.12, .12, .12))
+    else:
+        page.insert_font(fontname="LFScan", fontbuffer=font.buffer)
+        page.insert_text(origin, text, fontname="LFScan", fontsize=size, color=(.12, .12, .12))
+
+
+def fit_policy_paragraph(page, region, text, font, size, spacing):
+    """Selected-face paragraph fit with the existing scan spacing choices."""
+    import pymupdf as fitz
+    from linguafloat.document_graphic_layout import wrapped_lines
+    box = fitz.Rect(region['box'])
+    if box.is_empty or not page.rect.contains(box):
+        return None
+    # Retain explicit blank paragraph lines; the graphic label helper alone
+    # would drop them. Never use graphic-label 1.12 spacing for scan prose.
+    lines = [line for paragraph in text.splitlines() for line in
+             (wrapped_lines(paragraph, font, size, box.width) or [''])]
+    left, top, right, bottom = font.padding(size)
+    height = (font.ascender-font.descender)*size + top + bottom
+    step = max(size*spacing, height)
+    if (not lines or height+(len(lines)-1)*step > box.height or
+            any(font.text_length(line, fontsize=size) > box.width for line in lines)):
+        return None
+    with fitz.open() as probe:
+        trial = probe.new_page(width=page.rect.width, height=page.rect.height)
+        for index, line in enumerate(lines):
+            draw_scan_line(trial, (box.x0+left, box.y0+top+font.ascender*size+index*step), line, font, size)
+        if normalize(trial.get_text()) != normalize(text):
+            return None
+        probe.subset_fonts()
+        return probe.tobytes()
+
+
 def fit_single_line(page, region, text, font, size):
     """Fit real glyph ink instead of imposing a full font ascent on a scan row."""
     import numpy as np
@@ -366,9 +426,8 @@ def fit_single_line(page, region, text, font, size):
         return None
     with fitz.open() as probe:
         trial = probe.new_page(width=page.rect.width, height=page.rect.height)
-        trial.insert_font(fontname="LFScan", fontbuffer=font.buffer)
         start = fitz.Point(box.x0, box.y0 + size)
-        trial.insert_text(start, text, fontname="LFScan", fontsize=size, color=(.12, .12, .12))
+        draw_scan_line(trial, start, text, font, size)
         pix = trial.get_pixmap(matrix=fitz.Matrix(4, 4), clip=(box + (-size, -size, size, size)) & page.rect,
                               colorspace=fitz.csGRAY, alpha=False)
         rows, cols = np.nonzero(np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width) < 240)
@@ -380,8 +439,7 @@ def fit_single_line(page, region, text, font, size):
             return None
         start += fitz.Point(box.x0 + .125 - ink.x0, (box.y0 + box.y1 - ink.y0 - ink.y1) / 2)
         final = probe.new_page(width=page.rect.width, height=page.rect.height)
-        final.insert_font(fontname="LFScan", fontbuffer=font.buffer)
-        final.insert_text(start, text, fontname="LFScan", fontsize=size, color=(.12, .12, .12))
+        draw_scan_line(final, start, text, font, size)
         if normalize(final.get_text()) != normalize(text):
             return None
         probe.delete_page(0)
@@ -392,6 +450,12 @@ def fit_single_line(page, region, text, font, size):
 def translate_scan_page(source, number, kind, analyzer, digest, translator, emit):
     import pymupdf as fitz
     from linguafloat.document_failures import diagnostic
+    from linguafloat.document_graphics import graphic_font_resolver
+    font_pair = (getattr(translator.job, 'chinese_font', ''), getattr(translator.job, 'latin_font', ''))
+    cached_font = getattr(translator, '_scan_font_policy', None)
+    if cached_font is None or cached_font[:2] != font_pair:
+        cached_font = (*font_pair, graphic_font_resolver(*font_pair))
+        translator._scan_font_policy = cached_font
     page = source[number]
     try:
         regions = analyzer.regions(page, kind, digest)
@@ -449,9 +513,10 @@ def translate_scan_page(source, number, kind, analyzer, digest, translator, emit
                         translator.graphic_context.remember(number, region["text"], translation,
                                                             region.get("label", "body"))
                     stage = "排版"
-                    fitted = fit_translation(page, region, translation, translator.job.target, translator.control)
+                    fitting_region = dict(region, _font_resolver=cached_font[2]) if cached_font[2] is not None else region
+                    fitted = fit_translation(page, fitting_region, translation, translator.job.target, translator.control)
                     if fitted is None:
-                        reason = "译文在原框及字号下限内无法完整排入，未扩大页面或新增续页"
+                        reason = fitting_region.get('_fit_failure') or "译文在原框及字号下限内无法完整排入，未扩大页面或新增续页"
                 except Exception as error:
                     details = diagnostic(error, stage)
                     reason = details.pop("reason")
@@ -551,6 +616,11 @@ def translate_mixed_layout_pdf(job, translator, output, emit, pages, kinds):
                     fragment.insert_pdf(mono, from_page=index, to_page=index)
                     append_bilingual(dual, source, number, fragment, job.bilingual_layout)
         paths = []
+        if job.workflow == "body":
+            from linguafloat.document_postprocess import save_body_artifact
+            save_body_artifact(output, job, mono,
+                [dict(source=p, start=i, count=1, selected=not reference_page_only(boundary, p))
+                 for i, p in enumerate(pages)], translator)
         for enabled, label, document in ((job.mono, "译文", mono), (job.bilingual, "双语", dual)):
             if enabled:
                 translator.control.checkpoint()

@@ -5,7 +5,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
+from linguafloat.ui import QMessageBox
 
 from linguafloat.model_picker import MODEL_ROLE, SELECTED_ROLE, ModelSelector
 from test_credentials_ui import application, controller

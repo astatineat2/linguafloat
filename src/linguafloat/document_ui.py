@@ -15,7 +15,8 @@ from PySide6.QtGui import QDesktopServices, QPainter, QColor, QPen, QTextLayout,
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QSizePolicy,
     QHeaderView, QLabel, QLineEdit, QProgressBar, QPushButton, QScrollArea, QTextBrowser,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QRadioButton,
-    QButtonGroup, QToolButton, QSpinBox, QDoubleSpinBox, QTabWidget, QFrame, QStackedLayout)
+    QButtonGroup, QToolButton, QSpinBox, QDoubleSpinBox, QTabWidget, QFrame, QStackedLayout,
+    QDialog, QDialogButtonBox)
 
 from linguafloat.document_core import DocumentError, DocumentJob, JobStore, LANGUAGES, SUPPORTED, billing_display
 from linguafloat.theme import COLORS, section_heading, set_state
@@ -164,11 +165,14 @@ class DocumentPage(QWidget):
     cancel_requested = Signal()
     remove_requested = Signal()
     preferences_changed = Signal(dict)
+    graphics_requested = Signal(str)
+    graphics_refresh_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.profiles = {}
         self.active_id = ""
+        self._details_owner = None
         self._column_trees = {}
         self._auto_columns = {"files": True, "history": True}
         self._setting_columns = False
@@ -197,6 +201,8 @@ class DocumentPage(QWidget):
         self.add_button.clicked.connect(self.choose_files)
         self.rows = {}
         self.busy = False
+        self.font_confirmed = True
+        self.graphics_figures = self.graphics_tables = True
         self.clear_button = QPushButton("移除所选")
         self.clear_button.setIcon(qta.icon("mdi6.trash-can-outline"))
         self.clear_button.clicked.connect(self.remove_requested)
@@ -318,6 +324,10 @@ class DocumentPage(QWidget):
         self.copy_details.clicked.connect(self.copy_report)
         details_actions.addWidget(self.expand_details)
         details_actions.addStretch()
+        self.graphics_button = QPushButton("图片翻译")
+        self.graphics_button.setIcon(qta.icon("mdi6.chart-box-outline"))
+        self.graphics_button.setToolTip("从历史正文结果选择任务，确认后单独补译图片文字。")
+        self.graphics_button.clicked.connect(self.request_graphics)
         details_actions.addWidget(self.copy_details)
         layout.addLayout(details_actions)
         self.report.document().contentsChanged.connect(self._show_report_controls)
@@ -345,6 +355,19 @@ class DocumentPage(QWidget):
         self.pdf_mode.setToolTip("阅读版：重新排版并支持长译文续页。保留版式：保持原页尺寸；扫描件仅替换可验证区域，未处理处保留原文并报告。")
         self.pdf_mode.setCurrentIndex(self.pdf_mode.findData("layout"))
         form.add_field("译文排版", self.pdf_mode)
+        fonts = QHBoxLayout()
+        self.chinese_font = QComboBox()
+        self.chinese_font.addItem("宋体", "simsun")
+        self.chinese_font.addItem("微软雅黑", "msyh")
+        self.latin_font = QComboBox()
+        self.latin_font.addItem("Times New Roman", "times")
+        fonts.addWidget(self.chinese_font)
+        fonts.addWidget(self.latin_font)
+        form.add_field("译文字体 · PDF 保留版式", fonts, wide=True)
+        self.font_ack = QCheckBox("我已确认新任务使用以上字体；已有任务快照保持不变")
+        self.font_ack.setVisible(False)
+        self.font_ack.toggled.connect(self.acknowledge_fonts)
+        form.add_field("", self.font_ack, wide=True)
         formats = QHBoxLayout()
         self.mono = QCheckBox("纯译文")
         self.bilingual = QCheckBox("双语对照")
@@ -356,11 +379,15 @@ class DocumentPage(QWidget):
         form.add_field("输出文件", formats)
         self.relayout_only = QCheckBox("仅重新排版")
         self.relayout_only.setToolTip("复用已有译文，不调用翻译 API")
-        self.translate_graphics=QCheckBox("翻译图表内容（表格＋图内文字）")
-        self.translate_graphics.setToolTip("PDF / 图片保留版式：翻译表格和图内自然语言，保护数值、单位和公式。")
-        self.translate_graphics.setText("翻译图表内容")
-        options = ActionBar((self.relayout_only, self.translate_graphics))
+        self.translate_graphics=QCheckBox("图片翻译（历史偏好）")
+        self.translate_graphics.setToolTip("兼容旧版偏好；新正文默认翻译独立表格，图片通过底部按钮补译。")
+        self.translate_graphics.hide()  # Retain the old preference; never auto-start graphics.
+        options = ActionBar((self.relayout_only,))
         form.add_field("内容处理", options, wide=True)
+        graphics_hint = QLabel("独立表格随正文默认翻译；图内文字保留原文，正文完成后可点击底部“图片翻译”。")
+        graphics_hint.setWordWrap(True)
+        graphics_hint.setObjectName("muted")
+        form.add_field("图片处理", graphics_hint, wide=True)
         self.pdf_mode.currentIndexChanged.connect(self.refresh_graphics_controls)
         self.refresh_graphics_controls()
         arrangements = QHBoxLayout()
@@ -403,7 +430,7 @@ class DocumentPage(QWidget):
         self.open_button.clicked.connect(self.open_output)
         bottom.addWidget(self.usage)
         self.action_bar = ActionBar((self.trial_button, self.start_button,
-                                    self.pause_button, self.cancel_button, self.open_button))
+                                    self.graphics_button, self.pause_button, self.cancel_button, self.open_button))
         bottom.addWidget(self.action_bar)
         outer.addWidget(footer)
         self.last_output = ""
@@ -533,7 +560,7 @@ class DocumentPage(QWidget):
         self.history.clear()
         for identity, source, state, updated, raw in records:
             info = json.loads(raw)
-            label = {"completed": "完成", "failed": "失败", "cancelled": "取消"}.get(state,
+            label = {"completed": "完成", "partial": "部分完成", "failed": "失败", "cancelled": "取消"}.get(state,
                      "处理中" if identity == active_job_id else "中断")
             if state == "completed" and info.get("untranslated_regions"):
                 label = f"已完成，{info['untranslated_regions']} 处未翻译"
@@ -552,6 +579,8 @@ class DocumentPage(QWidget):
             item = QTreeWidgetItem([Path(source).name, info.get("file_type", Path(source).suffix[1:].upper()),
                                    size_text, elapsed_text, *billing_display(info, compact=True)[:2], ("试译" if info.get("trial") else "") + label])
             item.setData(0, Qt.ItemDataRole.UserRole, identity)
+            eligible = getattr(self, "graphics_eligibility", lambda _: False)(identity)
+            item.setData(0, Qt.ItemDataRole.UserRole + 3, bool(eligible))
             item.setForeground(6, QColor(COLORS[task_tone(label)]))
             item.setData(0, Qt.ItemDataRole.UserRole + 1, info)
             stamp = datetime.fromtimestamp(info.get("started_at", updated)).strftime("%Y-%m-%d %H:%M:%S")
@@ -596,13 +625,37 @@ class DocumentPage(QWidget):
             if identity == selected_id:
                 self.history.setCurrentItem(item)
         self.history.blockSignals(False)
+        if selected_id and self._details_owner == ("history", selected_id):
+            self.show_history_details()
         self._column_fit_timer.start(0)
+        self.refresh_graphics_controls()
 
     def show_history_details(self):
         item = self.history.currentItem()
         if item:
+            self._details_owner = ("history", item.data(0, Qt.ItemDataRole.UserRole))
             self.report.setPlainText(item.data(0, Qt.ItemDataRole.UserRole + 2))
             self._details_reveal_timer.start()
+        elif self.file_tabs.currentIndex() == 1:
+            self._details_owner = None
+            self.report.clear()
+
+    def acknowledge_fonts(self, checked):
+        self.font_confirmed = checked
+        self.preferences_changed.emit(self.preferences())
+
+    def request_graphics(self):
+        if self.busy:
+            return
+        self.file_tabs.setCurrentIndex(1)
+        self.graphics_refresh_requested.emit()
+        for i in range(self.history.topLevelItemCount()):
+            item = self.history.topLevelItem(i)
+            if item.data(0, Qt.ItemDataRole.UserRole + 3):
+                self.history.setCurrentItem(item)
+                self.graphics_requested.emit(item.data(0, Qt.ItemDataRole.UserRole))
+                return
+        self.report.setPlainText("没有材料完整的正文结果可供图片补译。请检查原文件、正文输出和原任务配置。")
 
     def _reveal_details(self):
         # Run after the list's focus/selection handling has finished scrolling.
@@ -648,11 +701,15 @@ class DocumentPage(QWidget):
     def set_profiles(self, profiles, active_id):
         self.profiles = {p.id: p for p in profiles}
         self.active_id = active_id
+        self.graphics_refresh_requested.emit()
 
     def preferences(self):
         return dict(document_source_language=self.source_language.currentData(),
             document_target_language=self.target.currentData(),document_pdf_mode=self.pdf_mode.currentData(),
             document_translate_graphics=self.translate_graphics.isChecked(),
+            document_chinese_font=self.chinese_font.currentData(), document_latin_font=self.latin_font.currentData(),
+            document_font_confirmed=self.font_confirmed,
+            document_graphics_figures=self.graphics_figures, document_graphics_tables=self.graphics_tables,
             document_mono=self.mono.isChecked(),
             document_bilingual=self.bilingual.isChecked(),
             document_bilingual_layout="side_by_side" if self.side_by_side.isChecked() else "alternating",
@@ -673,10 +730,15 @@ class DocumentPage(QWidget):
                             (self.pdf_mode,"document_pdf_mode")):
             widget.setCurrentIndex(max(0,widget.findData(getattr(settings,name))))
         self.translate_graphics.setChecked(settings.document_translate_graphics)
+        self.chinese_font.setCurrentIndex(max(0, self.chinese_font.findData(settings.document_chinese_font)))
+        self.font_confirmed = settings.document_font_confirmed
+        self.font_ack.setChecked(self.font_confirmed)
+        self.font_ack.setVisible(not self.font_confirmed)
+        self.graphics_figures, self.graphics_tables = settings.document_graphics_figures, settings.document_graphics_tables
         self.mono.setChecked(settings.document_mono)
         self.bilingual.setChecked(settings.document_bilingual)
         (self.side_by_side if settings.document_bilingual_layout=="side_by_side" else self.alternating).setChecked(True)
-        for widget in (self.source_language,self.target,self.pdf_mode):
+        for widget in (self.source_language,self.target,self.pdf_mode,self.chinese_font,self.latin_font):
             widget.currentIndexChanged.connect(lambda: self.preferences_changed.emit(self.preferences()))
         for widget in (self.translate_graphics,self.mono,self.bilingual,self.side_by_side,self.alternating):
             widget.toggled.connect(lambda: self.preferences_changed.emit(self.preferences()))
@@ -738,6 +800,7 @@ class DocumentPage(QWidget):
     def show_details(self, row_id):
         row = self.rows.get(row_id)
         if row:
+            self._details_owner = ("files", row_id)
             self.report.setPlainText(row.get("details", row["state"]))
             self._details_reveal_timer.start()
 
@@ -750,6 +813,8 @@ class DocumentPage(QWidget):
             row["value"] = value
         if details is not None:
             row["details"] = details
+            if self.file_tabs.currentIndex() == 0 and self._details_owner == ("files", row_id):
+                self.report.setPlainText(details)
         row["item"].setText(3, state)
         bar = row["bar"]
         bar.setRange(0, 0 if value is None and state in {"解析中", "OCR 中", "翻译中", "排版中", "字体处理中", "保存中"} else 100)
@@ -811,9 +876,13 @@ class DocumentPage(QWidget):
 
     def set_busy(self, busy):
         self.busy = busy
+        if not busy and self.progress.maximum() == 0:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
         for control in (self.add_button, self.start_button, self.trial_button,
                         self.target, self.source_language, self.pages,
-                        self.pdf_mode, self.mono, self.bilingual, self.output_dir, self.browse, self.relayout_only):
+                        self.pdf_mode, self.mono, self.bilingual, self.output_dir, self.browse, self.relayout_only,
+                        self.chinese_font, self.latin_font, self.font_ack, self.graphics_button):
             control.setEnabled(not busy)
         for button in (self.side_by_side, self.alternating):
             button.setEnabled(not busy and self.bilingual.isChecked())
@@ -825,6 +894,9 @@ class DocumentPage(QWidget):
     def refresh_graphics_controls(self):
         enabled=not self.busy and self.pdf_mode.currentData()=="layout"
         self.translate_graphics.setEnabled(enabled)
+        self.graphics_button.setEnabled(not self.busy and any(
+            self.history.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole + 3)
+            for i in range(self.history.topLevelItemCount())))
 
 
 def worker_command():
@@ -853,23 +925,48 @@ class DocumentController(QObject):
         if settings.document_output_dir:
             page.output_dir.setText(settings.document_output_dir)
         page.start_requested.connect(self.start)
+        page.graphics_requested.connect(self.start_graphics)
+        page.graphics_refresh_requested.connect(self.refresh_history)
+        page.graphics_eligibility = self.graphics_record
         page.pause_requested.connect(self.pause)
         page.cancel_requested.connect(self.cancel)
         page.remove_requested.connect(self.remove_selected)
-        page.file_tabs.currentChanged.connect(lambda index: self.refresh_history() if index == 1 else None)
+        page.file_tabs.currentChanged.connect(self._tab_changed)
+        self._reconcile_timer = QTimer(self)
+        self._reconcile_timer.setInterval(1000)
+        self._reconcile_timer.timeout.connect(self._reconcile_process)
+        self._reconcile_timer.start()
         if self.database.exists():
             store = JobStore(self.database)
             try:
                 for source, status, details in reversed(store.recent()):
                     info = json.loads(details)
-                    label = {"completed": "完成", "failed": "失败", "cancelled": "已取消"}.get(status, "中断，可重新添加并复用缓存")
+                    label = {"completed": "完成", "partial": "部分完成", "failed": "失败", "cancelled": "已取消"}.get(status, "中断，可重新添加并复用缓存")
                     if status == "completed" and info.get("untranslated_regions"):
                         label = f"已完成，{info['untranslated_regions']} 处未翻译"
-                    if status == "completed" and info.get("outputs"):
+                    if status in {"completed", "partial"} and info.get("outputs"):
                         page.last_output = str(Path(info["outputs"][0]).parent)
             finally:
                 store.close()
         self.refresh_history()
+
+    def _tab_changed(self, index):
+        if index == 1:
+            self.refresh_history()
+            self.page.show_history_details()
+        else:
+            item = self.page.files.currentItem()
+            row_id = item.data(0, Qt.ItemDataRole.UserRole + 1) if item else self.row_id
+            if row_id in self.page.rows:
+                self.page.show_details(row_id)
+            else:
+                self.page._details_owner = None
+                self.page.report.clear()
+
+    def _reconcile_process(self):
+        # No heartbeat deadline: a long live request is not evidence of a dead worker.
+        if self.process is not None and self.process.state() == QProcess.ProcessState.NotRunning:
+            self.process_finished(process=self.process)
 
     def refresh_history(self):
         store = JobStore(self.database)
@@ -884,6 +981,9 @@ class DocumentController(QObject):
             return
         if self.page.busy:
             return
+        if not self.page.font_confirmed:
+            self.page.report.setPlainText("升级后的新任务需先确认译文字体。请选择宋体或微软雅黑，并勾选字体升级确认；未创建任务。")
+            return
         self.page.output_directory_changed.emit(self.page.output_dir.text())
         self.queue = []
         try:
@@ -895,8 +995,8 @@ class DocumentController(QObject):
                 raise DocumentError("请选择输出目录。")
             for i in range(self.page.files.topLevelItemCount()):
                 item = self.page.files.topLevelItem(i)
-                graphics_enabled=(self.page.translate_graphics.isChecked() and self.page.pdf_mode.currentData()=="layout"
-                    and Path(item.data(0,Qt.ItemDataRole.UserRole)).suffix.lower() not in {".docx",".pptx"})
+                layout_pdf = (self.page.pdf_mode.currentData()=="layout" and
+                    Path(item.data(0,Qt.ItemDataRole.UserRole)).suffix.lower() not in {".docx",".pptx"})
                 job = DocumentJob(source=item.data(0, Qt.ItemDataRole.UserRole), output_dir=self.page.output_dir.text().strip(),
                     provider=asdict(profile), target=self.page.target.currentData(), source_language=self.page.source_language.currentData(),
                     pages=self.page.pages.text(), trial=trial, mono=self.page.mono.isChecked(), bilingual=self.page.bilingual.isChecked(),
@@ -904,8 +1004,11 @@ class DocumentController(QObject):
                     bilingual_layout="side_by_side" if self.page.side_by_side.isChecked() else "alternating",
                     request_timeout=profile.document_timeout,
                     relayout_only=self.page.relayout_only.isChecked(),
-                    translate_tables=graphics_enabled,
-                    translate_figures=graphics_enabled,
+                    workflow="body" if layout_pdf else "legacy",
+                    chinese_font=self.page.chinese_font.currentData() if layout_pdf else "",
+                    latin_font=self.page.latin_font.currentData() if layout_pdf else "",
+                    translate_tables=layout_pdf,
+                    translate_figures=False,
                     graphic_overrides={}, pricing={}, skip_references=True)
                 job.validate()
                 self.queue.append((job, key, item.data(0, Qt.ItemDataRole.UserRole + 1)))
@@ -925,12 +1028,162 @@ class DocumentController(QObject):
         self.total_requests = self.total_hits = 0
         self.page.usage.setText("成功请求 0 · 缓存命中 0")
         self.page.report.clear()
+        self.page._details_owner = ("files", self.row_id)
         self.page.set_busy(True)
         self.batch_ids = [row_id for _, _, row_id in self.queue]
         self.batch_results = {}
         for row_id in self.batch_ids:
             self.page.update_row(row_id, "待处理", 0, "等待处理")
         self.next_job()
+
+    def graphics_record(self, identity, *, strict=False):
+        """Use the same immutable artifact gate as the worker, without credentials."""
+        store = JobStore(self.database)
+        try:
+            row = store.db.execute("SELECT source,status,details FROM jobs WHERE id=?", (identity,)).fetchone()
+            if not row or row[1] not in {"completed", "partial"}:
+                raise DocumentError("仅已完成或部分完成的正文任务可以补译图片。")
+            source, _, raw = row
+            info = json.loads(raw)
+            configuration = info.get("configuration", {})
+            if configuration.get("workflow") != "body" or configuration.get("parent_job_id") or info.get("parent_job_id"):
+                raise DocumentError("请选择正文任务，不是图片补译子任务。")
+            if not Path(source).is_file() or not any(Path(p).is_file() for p in info.get("outputs", [])):
+                raise DocumentError("原文件或正文输出已缺失，不能启动图片补译。")
+            profile = copy.deepcopy(self.page.profiles.get(configuration.get("provider_id")))
+            if profile is None:
+                raise DocumentError("原任务供应商配置不存在，请先恢复配置。")
+            artifact = info.get("graphics_source", "")
+            if not artifact:
+                raise DocumentError("该旧任务未保存完整的图片补译材料；不会自动重翻正文。")
+            from linguafloat.document_postprocess import validate_graphics_source
+            manifest = validate_graphics_source(store, identity, artifact, source=source,
+                provider=asdict(profile), verify_pdf=False)
+            return source, info, profile, artifact, manifest
+        except (DocumentError, OSError, ValueError, KeyError, TypeError):
+            if strict:
+                raise
+            return None
+        finally:
+            store.close()
+
+    def choose_graphics_history(self):
+        self.refresh_history()
+        dialog = QDialog(self.page)
+        dialog.setWindowTitle("选择正文历史任务")
+        dialog.resize(780, 380)
+        layout = QVBoxLayout(dialog)
+        tree = QTreeWidget()
+        tree.setHeaderLabels(["文件名", "任务时间", "页码范围", "状态 / 任务编号"])
+        tree.setRootIsDecorated(False)
+        for i in range(self.page.history.topLevelItemCount()):
+            original = self.page.history.topLevelItem(i)
+            identity = original.data(0, Qt.ItemDataRole.UserRole)
+            record = self.graphics_record(identity)
+            if not record:
+                continue
+            source, info, _, _, manifest = record
+            when = datetime.fromtimestamp(info['started_at']).strftime('%Y-%m-%d %H:%M:%S')
+            item = QTreeWidgetItem([Path(source).name, when, manifest['selected_pages'] or '全部',
+                                   original.text(6) + ' · ' + identity[:12]])
+            item.setToolTip(0, source)
+            item.setData(0, Qt.ItemDataRole.UserRole, identity)
+            tree.addTopLevelItem(item)
+        tree.setColumnWidth(0, 300)
+        tree.setColumnWidth(1, 165)
+        layout.addWidget(tree)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("选择")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        tree.itemSelectionChanged.connect(lambda: buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(tree.currentItem())))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted and tree.currentItem():
+            identity = tree.currentItem().data(0, Qt.ItemDataRole.UserRole)
+            for i in range(self.page.history.topLevelItemCount()):
+                item = self.page.history.topLevelItem(i)
+                if item.data(0, Qt.ItemDataRole.UserRole) == identity:
+                    self.page.history.setCurrentItem(item)
+                    break
+            return identity
+        return None
+
+    def start_graphics(self, identity):
+        if self.page.busy or getattr(self, "update_pending", False):
+            return
+        try:
+            source, info, profile, artifact, manifest = self.graphics_record(identity, strict=True)
+            dialog = QDialog(self.page)
+            dialog.setWindowTitle("图片翻译")
+            dialog.setMinimumWidth(410)
+            layout = QVBoxLayout(dialog)
+            when = datetime.fromtimestamp(info['started_at']).strftime('%Y-%m-%d %H:%M:%S')
+            description = QLabel(f"是否对以下正文结果进行图片翻译？\n{Path(source).name}\n"
+                f"任务时间：{when} · {identity[:12]}\n页码范围：{manifest['selected_pages'] or '全部'}\n"
+                "补译范围：图内文字（不重译独立表格）。复用正文、图注和缓存，结果编号另存，不覆盖旧结果。"
+                + ("\n此历史正文未启用独立表格翻译；本次只补译图片，不会自动补译旧版表格。"
+                   if not info.get('configuration', {}).get('translate_tables') else ""))
+            description.setWordWrap(True)
+            description.setTextFormat(Qt.TextFormat.PlainText)
+            layout.addWidget(description)
+            figures = QCheckBox("图内文字")
+            figures.setChecked(self.page.graphics_figures)
+            layout.addWidget(figures)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No)
+            yes = buttons.button(QDialogButtonBox.StandardButton.Yes)
+            yes.setText("是")
+            buttons.button(QDialogButtonBox.StandardButton.No).setText("否")
+            custom = buttons.addButton("自定义文件", QDialogButtonBox.ButtonRole.ActionRole)
+            custom.clicked.connect(lambda: dialog.done(2))
+            def scope_changed():
+                yes.setEnabled(figures.isChecked())
+            figures.toggled.connect(scope_changed)
+            scope_changed()
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            result = dialog.exec()
+            if result == 2:
+                selected = self.choose_graphics_history()
+                if selected:
+                    self.start_graphics(selected)
+                return
+            if result != QDialog.DialogCode.Accepted:
+                return
+            # Recheck files and binding after the modal, before credentials/queue.
+            source, info, profile, artifact, manifest = self.graphics_record(identity, strict=True)
+            key = self.credentials.get_api_key(profile.id, profile.env_key)
+            if not key:
+                raise DocumentError("原任务供应商没有可用密钥，请在配置设置中检查。")
+            job = DocumentJob(source=source, output_dir=str(Path(artifact).parent.parent), provider=asdict(profile),
+                target=manifest["target"], source_language=manifest["source_language"], pages=manifest["selected_pages"],
+                trial=manifest["trial"],
+                pdf_mode="layout", workflow="graphics", parent_job_id=identity, graphics_source=artifact,
+                chinese_font=manifest["chinese_font"], latin_font=manifest["latin_font"],
+                mono=manifest["mono"], bilingual=manifest["bilingual"], bilingual_layout=manifest["bilingual_layout"],
+                skip_references=manifest["skip_references"], reference_boundary=manifest["reference_boundary"],
+                translate_figures=figures.isChecked(), translate_tables=False,
+                request_timeout=profile.document_timeout, job_id=uuid.uuid4().hex)
+            job.validate()
+            python, entry = worker_command()
+            if not python.is_file() or not entry.is_file():
+                raise DocumentError("完整文档运行环境缺失。")
+            self.page.graphics_figures = figures.isChecked()
+            self.page.preferences_changed.emit(self.page.preferences())
+            self.page.add_files([source])
+            item = next(self.page.files.topLevelItem(i) for i in range(self.page.files.topLevelItemCount())
+                        if Path(self.page.files.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)).resolve() == Path(source).resolve())
+            row_id = item.data(0, Qt.ItemDataRole.UserRole + 1)
+            self.queue = [(job, key, row_id)]
+            self.cancelled = self.paused = False
+            self.total_requests = self.total_hits = 0
+            self.batch_ids, self.batch_results = [row_id], {}
+            self.page.set_busy(True)
+            self.next_job()
+        except (DocumentError, KeyError, ValueError) as error:
+            self.page.report.setPlainText(str(error))
 
     def update_batch(self):
         completed = sum(state == "完成" for state in self.batch_results.values())
@@ -969,6 +1222,7 @@ class DocumentController(QObject):
                     self.page.file_tabs.setCurrentIndex(1)
             return
         self.job, key, self.row_id = self.queue.pop(0)
+        self.page.rows[self.row_id]["job_id"] = self.job.job_id
         store = JobStore(self.database)
         try:
             store.status(self.job, "running")
@@ -992,99 +1246,121 @@ class DocumentController(QObject):
         self.refresh_history()
         process.setProgram(str(python))
         process.setArguments(["-I", "-u", str(entry)])
-        process.readyReadStandardOutput.connect(self.read_events)
+        process.readyReadStandardOutput.connect(lambda job_id=self.job.job_id: self.read_events(process, job_id))
         process.readyReadStandardError.connect(lambda: process.readAllStandardError())
         payload = json.dumps({"job": asdict(self.job), "api_key": key, "database": str(self.database)}, ensure_ascii=False).encode() + b"\n"
         process.started.connect(lambda: process.write(payload))
-        process.finished.connect(self.process_finished)
-        process.errorOccurred.connect(self.process_error)
+        process.finished.connect(lambda *args: self.process_finished(*args, process=process))
+        process.errorOccurred.connect(lambda error: self.process_error(error) if self.process is process else None)
         process.start()
 
-    def read_events(self):
-        if self.process is None:
+    def _diagnostic(self, kind, error):
+        if self.job is None:
+            return
+        try:
+            store = JobStore(self.database)
+            try:
+                store.diagnostic_event(self.job, dict(component="document_ui", event_type=kind,
+                                                       error_type=type(error).__name__))
+            finally:
+                store.close()
+        except Exception:
+            pass  # Diagnostics must never block terminal cleanup.
+
+    def read_events(self, process=None, job_id=None):
+        if self.process is None or process is not None and process is not self.process:
+            return
+        if job_id is not None and (self.job is None or job_id != self.job.job_id):
             return
         self.pending += bytes(self.process.readAllStandardOutput())
         while b"\n" in self.pending:
             line, self.pending = self.pending.split(b"\n", 1)
             try:
                 event = json.loads(line)
-            except (ValueError, UnicodeDecodeError):
-                continue
-            kind = event.get("type")
-            if self.cancelled:
-                continue
-            if kind == "progress" and not self.paused:
-                value = event.get("value")
-                value = min(99, max(0, int(value))) if value is not None else None
-                scoped = event.get("progress_scope") == "stage"
-                if value is not None and not scoped:
-                    value = max(value, self.page.rows.get(self.row_id, {}).get("value", 0))
-                self.page.progress.setRange(0, 0 if value is None or scoped else 100)
-                if value is not None and not scoped:
-                    self.page.progress.setValue(value)
-                message = event.get("message", "处理中")
-                stage = event.get("stage", "翻译中")
-                self.page.update_row(self.row_id, stage, value, message)
-                if scoped and value is not None:
-                    self.page.rows[self.row_id]["bar"].setFormat(f"{stage} · 阶段 {value}%")
-                caption = stage
-                if value is not None:
-                    caption += f" · {'阶段 ' if scoped else ''}{value}%"
-                self.page.status.set_task(Path(self.job.source).name, caption, message)
-            elif kind == "usage":
-                self.page.update_billing(self.row_id, event)
-                self.job_requests, self.job_hits = event["requests"], event["cache_hits"]
-                self.page.usage.setText(f"成功请求 {self.total_requests + self.job_requests} · 缓存命中 {self.total_hits + self.job_hits}")
-                if self.page.file_tabs.currentIndex() == 1:
-                    self.refresh_history()
-            elif kind == "activity" and not self.paused:
-                message = event.get("message", "等待 API 返回")
-                if event.get("stage"):
-                    self.page.update_row(self.row_id, event["stage"], None, message)
-                    self.page.progress.setRange(0, 0)
-                stage = event.get("stage") or self.page.rows.get(self.row_id, {}).get("state", "处理中")
-                self.page.status.set_task(Path(self.job.source).name, stage, message)
-                row = self.page.rows.get(self.row_id)
-                if row:
-                    row["details"] = message
-            elif kind == "finished":
-                self.terminal = True
-                retained = event.get("untranslated_regions", 0)
-                completion = (f"已完成，{retained} 处未翻译" if retained else "已完成")
-                self.page.update_billing(self.row_id, {"usage_state": "finished", **event.get("usage", {})})
-                state = f"已完成，{retained} 处未翻译" if retained else ("试译完成" if self.job.trial else "已完成")
-                self.page.update_row(self.row_id, state, 100,
-                                     "\n".join([*event.get("outputs", []), *event.get("warnings", []), *event.get("issues", [])]))
-                self.batch_results[self.row_id] = "部分完成" if retained else "完成"
-                self.update_batch()
-                self.page.progress.setRange(0, 100)
-                self.page.progress.setValue(100)
-                notes = [*event.get("warnings", []), *event.get("issues", [])]
-                self.page.status.set_task(Path(self.job.source).name, state,
-                                          notes[0] if notes else f"已生成 {len(event.get('outputs', []))} 个结果文件")
-                set_state(self.page.status, "paused" if retained else "success")
-                self.job_requests, self.job_hits = event.get("requests", 0), event.get("cache_hits", 0)
-                self.page.usage.setText(f"成功请求 {self.total_requests + self.job_requests} · 缓存命中 {self.total_hits + self.job_hits}")
-                if event.get("performance", {}).get("operation_counts", {}).get("译后中间数据缓存命中"):
-                    self.page.usage.setText(self.page.usage.text() + " · 已复用译后文档")
-                paths = event.get("outputs", [])
-                if paths:
-                    self.page.last_output = str(Path(paths[0]).parent)
-                    self.item.setData(1, Qt.ItemDataRole.UserRole, self.page.last_output)
-                self.page.report.append(Path(self.job.source).name + "：" + completion)
-                for text in [*paths, *event.get("warnings", []), *event.get("issues", [])]:
-                    self.page.report.append(text.replace("<", "&lt;"))
-            elif kind in {"error", "cancelled"}:
-                self.terminal = True
-                self.page.update_row(self.row_id, "失败" if kind == "error" else "已取消", details=event.get("message", "文件处理失败"))
-                self.batch_results[self.row_id] = "失败" if kind == "error" else "取消"
-                self.update_batch()
-                message = event.get("message") or "文件处理失败"
-                self.page.status.set_task(Path(self.job.source).name, "失败" if kind == "error" else "已取消", message)
-                set_state(self.page.status, "error" if kind == "error" else "paused")
-                self.page.report.append("<div style='white-space:pre-wrap'>" + html.escape(
-                    Path(self.job.source).name + "：" + event.get("message", "失败")) + "</div>")
-                self.page.scroll.ensureWidgetVisible(self.page.report)
+                if not isinstance(event, dict):
+                    raise ValueError("invalid event")
+                if event.get("job_id") is not None and event["job_id"] != self.job.job_id:
+                    continue
+                if self.terminal or self.cancelled:
+                    continue
+                self._handle_event(event)
+            except Exception as error:
+                self._diagnostic("ipc_event", error)
+                # Keep draining: a malformed/failed event must not hide the terminal event.
+
+    def _handle_event(self, event):
+        kind = event.get("type")
+        if kind == "progress" and not self.paused:
+            value = event.get("value")
+            value = min(99, max(0, int(value))) if value is not None else None
+            scoped = event.get("progress_scope") == "stage"
+            if value is not None and not scoped:
+                value = max(value, self.page.rows.get(self.row_id, {}).get("value", 0))
+            self.page.progress.setRange(0, 0 if value is None or scoped else 100)
+            if value is not None and not scoped:
+                self.page.progress.setValue(value)
+            message = event.get("message", "处理中")
+            stage = event.get("stage", "翻译中")
+            self.page.update_row(self.row_id, stage, value, message)
+            if scoped and value is not None:
+                self.page.rows[self.row_id]["bar"].setFormat(f"{stage} · 阶段 {value}%")
+            caption = stage
+            if value is not None:
+                caption += f" · {'阶段 ' if scoped else ''}{value}%"
+            self.page.status.set_task(Path(self.job.source).name, caption, message)
+        elif kind == "usage":
+            self.page.update_billing(self.row_id, event)
+            self.job_requests, self.job_hits = event["requests"], event["cache_hits"]
+            self.page.usage.setText(f"成功请求 {self.total_requests + self.job_requests} · 缓存命中 {self.total_hits + self.job_hits}")
+            if self.page.file_tabs.currentIndex() == 1:
+                self.refresh_history()
+        elif kind == "activity" and not self.paused:
+            message = event.get("message", "等待 API 返回")
+            if event.get("stage"):
+                self.page.update_row(self.row_id, event["stage"], None, message)
+                self.page.progress.setRange(0, 0)
+            stage = event.get("stage") or self.page.rows.get(self.row_id, {}).get("state", "处理中")
+            self.page.status.set_task(Path(self.job.source).name, stage, message)
+            self.page.update_row(self.row_id, stage, details=message)
+        elif kind == "finished":
+            self.terminal = True
+            retained = event.get("untranslated_regions", 0)
+            self.page.update_billing(self.row_id, {"usage_state": "finished", **event.get("usage", {})})
+            state = f"已完成，{retained} 处未翻译" if retained else ("试译完成" if self.job.trial else "已完成")
+            if event.get('transport_partial'):
+                state = f'部分完成，{retained} 处保留原文'
+            self.page.update_row(self.row_id, state, 100,
+                                 "\n".join([*event.get("outputs", []), *event.get("warnings", []), *event.get("issues", [])]))
+            self.batch_results[self.row_id] = "部分完成" if retained or event.get('transport_partial') else "完成"
+            self.update_batch()
+            self.page.progress.setRange(0, 100)
+            self.page.progress.setValue(100)
+            notes = [*event.get("warnings", []), *event.get("issues", [])]
+            self.page.status.set_task(Path(self.job.source).name, state,
+                                      notes[0] if notes else f"已生成 {len(event.get('outputs', []))} 个结果文件")
+            set_state(self.page.status, "paused" if retained or event.get('transport_partial') else "success")
+            self.job_requests, self.job_hits = event.get("requests", 0), event.get("cache_hits", 0)
+            self.page.usage.setText(f"成功请求 {self.total_requests + self.job_requests} · 缓存命中 {self.total_hits + self.job_hits}")
+            if event.get("performance", {}).get("operation_counts", {}).get("译后中间数据缓存命中"):
+                self.page.usage.setText(self.page.usage.text() + " · 已复用译后文档")
+            paths = event.get("outputs", [])
+            if paths:
+                self.page.last_output = str(Path(paths[0]).parent)
+                self.item.setData(1, Qt.ItemDataRole.UserRole, self.page.last_output)
+            if self.page.file_tabs.currentIndex() == 0:
+                self.page.show_details(self.row_id)
+        elif kind in {"error", "cancelled"}:
+            self.terminal = True
+            self.page.progress.setRange(0, 100)
+            self.page.progress.setValue(0)
+            self.page.update_row(self.row_id, "失败" if kind == "error" else "已取消", details=event.get("message", "文件处理失败"))
+            self.batch_results[self.row_id] = "失败" if kind == "error" else "取消"
+            self.update_batch()
+            message = event.get("message") or "文件处理失败"
+            self.page.status.set_task(Path(self.job.source).name, "失败" if kind == "error" else "已取消", message.splitlines()[0])
+            set_state(self.page.status, "error" if kind == "error" else "paused")
+            if self.page.file_tabs.currentIndex() == 0:
+                self.page.show_details(self.row_id)
 
     def process_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
@@ -1101,12 +1377,18 @@ class DocumentController(QObject):
                 store.close()
             self.process_finished()
 
-    def process_finished(self, *_):
-        if self.process is None:
+    def process_finished(self, *_, process=None):
+        if self.process is None or process is not None and process is not self.process:
             return
-        self.read_events()
-        process, self.process = self.process, None
-        process.deleteLater()
+        try:
+            self.read_events()
+            self._restore_terminal()
+        except Exception as error:
+            self._diagnostic("process_finished", error)
+        finally:
+            process, self.process = self.process, None
+            process.deleteLater()
+            self.pending = b""
         self.total_requests += self.job_requests
         self.total_hits += self.job_hits
         if not self.terminal:
@@ -1120,16 +1402,49 @@ class DocumentController(QObject):
             if not self.cancelled:
                 self.page.status.setText("文档进程异常退出，可重新开始并复用已完成缓存。")
                 set_state(self.page.status, "error")
-            store = JobStore(self.database)
-            store.status(self.job, status, {"message": self.page.status.text()})
-            store.close()
+            try:
+                store = JobStore(self.database)
+                try:
+                    # A persisted terminal record remains authoritative.
+                    row = store.db.execute("SELECT status FROM jobs WHERE id=?", (self.job.job_id,)).fetchone()
+                    if not row or row[0] not in {"failed", "completed", "partial", "cancelled"}:
+                        store.status(self.job, status, {"message": self.page.status.text()})
+                finally:
+                    store.close()
+            except Exception as error:
+                self._diagnostic("terminal_persist", error)
             self.page.update_row(self.row_id, "已取消" if self.cancelled else "进程异常退出", details=self.page.status.text())
             self.page.report.setPlainText(Path(self.job.source).name + "：" + self.page.status.text())
-        self.refresh_history()
+        try:
+            self.refresh_history()
+        except Exception as error:
+            self._diagnostic("history_refresh", error)
         if self.terminal and self.batch_results.get(self.row_id) in {"完成", "部分完成"}:
             self.page.remove_row(self.row_id)
-        if not self.paused or self.cancelled:
+        if not self.paused or self.cancelled or not self.queue:
             self.next_job()
+
+    def _restore_terminal(self):
+        store = JobStore(self.database)
+        try:
+            row = store.db.execute("SELECT status,details FROM jobs WHERE id=?", (self.job.job_id,)).fetchone()
+            if row and self.cancelled and row[0] in {"failed", "completed", "partial"}:
+                store.status(self.job, "cancelled", {"message": "任务已取消，已完成缓存保留"})
+                row = store.db.execute("SELECT status,details FROM jobs WHERE id=?", (self.job.job_id,)).fetchone()
+        finally:
+            store.close()
+        if not row or row[0] not in {"failed", "completed", "partial", "cancelled"}:
+            return
+        info = json.loads(row[1])
+        self.job_requests = info.get("requests", self.job_requests)
+        self.job_hits = info.get("cache_hits", self.job_hits)
+        self.page.update_billing(self.row_id, info)
+        self.page.usage.setText(f"成功请求 {self.total_requests + self.job_requests} · 缓存命中 {self.total_hits + self.job_hits}")
+        kind = {"failed": "error", "completed": "finished", "partial": "finished", "cancelled": "cancelled"}[row[0]]
+        if self.cancelled:
+            kind = "cancelled"
+        self._handle_event({**info, "type": kind, "usage": info,
+                            "message": "任务已取消，已完成缓存保留" if self.cancelled else info.get("message", "任务已结束")})
 
     def pause(self):
         if self.process is None and not self.queue:
