@@ -2,9 +2,9 @@
 
 **面向大学生、科研学习者和外服游戏玩家的 Windows 桌面翻译工具。**
 
-[下载 v0.19.3](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.3) · [查看源码](https://github.com/astatineat2/linguafloat) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
+[下载 v0.19.6](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.6) · [查看源码](https://github.com/astatineat2/linguafloat) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
 
-**当前版本：v0.19.3。** 改善中文混合表头、字体、公式保护和文档结构；独立表格随正文默认翻译，图片按需补译。提供完整便携 ZIP、匹配的对应源码及校验材料，不提供新安装包；安装验收仍暂停。详情见[本版说明](发布说明-v0.19.3.md)。
+**当前版本：v0.19.6。** 改善中文混合表头、字体、公式保护和文档结构；独立表格随正文默认翻译，图片按需补译。提供完整便携 ZIP、匹配的对应源码及校验材料，不提供新安装包；安装验收仍暂停。详情见[本版说明](发布说明-v0.19.6.md)。
 
 ## 为什么做 LinguaFloat
 
@@ -31,9 +31,9 @@ LinguaFloat 最初是为了玩外服游戏时，看懂屏幕上的外文对话�
 
 ## 下载与开始使用
 
-当前版本：**v0.19.3 · Windows x64**。本版不制作安装包；完整安装、完成页及卸载尚未验收，发布不代表这些项目已通过。
+当前版本：**v0.19.6 · Windows x64**。本版不制作安装包；完整安装、完成页及卸载尚未验收，发布不代表这些项目已通过。
 
-1. 前往 [v0.19.3 下载页](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.3)，下载 `LinguaFloat-v0.19.3-win-x64.zip`。
+1. 前往 [v0.19.6 下载页](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.6)，下载 `LinguaFloat-v0.19.6-win-x64.zip`。
 2. 完整解压到有写入权限的目录，运行 `LinguaFloat.exe`。**无需安装 Python**；请保留 `_internal`、`document-runtime` 和更新助手，不要只复制 EXE。
 3. 首次进入可配置翻译服务并保存，或跳过后从配置入口设置。保存不会自动请求接口；“获取模型”或实际翻译由用户主动触发。详细步骤见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
 
@@ -43,7 +43,9 @@ LinguaFloat 最初是为了玩外服游戏时，看懂屏幕上的外文对话�
 
 取词和游戏画面兼容性因软件而异；独占全屏或受保护画面可能无法截图。复杂扫描件、图表和公式的译文排版需要检查，不保证所有文件无损还原。当前程序没有 Windows Authenticode 签名；下载及更新校验、网络说明见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
 
-## 当前版本 · v0.19.3
+## 当前版本 · v0.19.6
+
+- 图片无法完整安全排入时保留整图；修复短图注边界与裁切范围外的隐藏复制文字。
 
 - 中文混合科学表头整格紧凑居中，保留原始科学字形及上下标，数据与表格边界不移动。
 - 独立表格随正文处理，图片在正文完成后由用户确认补译；结果另存且复用合格缓存。

@@ -26,7 +26,11 @@ for path in (root / "src/linguafloat").glob("*.py"):
     if path.stem in {"__main__", "cc_switch_ui"}:
         continue
     module = "linguafloat" if path.stem == "__init__" else f"linguafloat.{path.stem}"
-    if path.stem in {"document_failures", "document_worker", "document_office", "document_pdf", "document_layout", "document_geometry", "document_scan_layout", "document_scan_recovery", "document_scientific", "document_richtext", "document_artifacts", "document_frontmatter", "document_graphics", "document_graphic_layout", "document_references", "document_ocr", "document_structure", "document_navigation", "document_publication"}:
+    if path.stem in {'document_clip','document_reviewed','document_glyph_patch'}:
+        assert (args.dist_dir/'document-runtime/src/linguafloat'/path.name).read_bytes()==path.read_bytes()
+        checked+=1
+        continue
+    if path.stem in {"document_failures", "document_worker", "document_office", "document_pdf", "document_layout", "document_geometry", "document_scan_layout", "document_scan_recovery", "document_scientific", "document_richtext", "document_artifacts", "document_frontmatter", "document_graphics", "document_graphic_layout", "document_references", "document_ocr", "document_structure", "document_navigation", "document_publication", "document_publisher_footer", "document_masthead"}:
         runtime_source = args.dist_dir / "document-runtime" / "src" / "linguafloat" / path.name
         assert runtime_source.read_bytes() == path.read_bytes(), f"Stale document worker: {path.name}"
         checked += 1
@@ -43,6 +47,6 @@ assert (args.dist_dir / "_internal/release/channel.json").read_bytes() == (root 
 for name in ("__init__.py", "api_compat.py", "document_context.py", "document_core.py", "document_metrics.py", "document_scheduler.py", "document_artifacts.py", "document_office.py", "document_pdf.py", "document_layout.py", "document_geometry.py", "document_scan_layout.py", "document_scan_recovery.py", "document_scientific.py", "document_references.py", "document_worker.py"):
     assert (args.dist_dir / "document-runtime/src/linguafloat" / name).read_bytes() == (root / "src/linguafloat" / name).read_bytes()
 assert (args.dist_dir / "document-runtime/worker_entry.py").read_bytes() == (root / "scripts/document_worker_entry.py").read_bytes()
-for name in ("document_fonts.py", "document_structure.py", "document_navigation.py", "document_postprocess.py", "document_publication.py"):
+for name in ("document_fonts.py", "document_structure.py", "document_navigation.py", "document_postprocess.py", "document_publication.py", "document_publisher_footer.py", "document_masthead.py"):
     assert (args.dist_dir / "document-runtime/src/linguafloat" / name).read_bytes() == (root / "src/linguafloat" / name).read_bytes()
 print(f"Portable build verified: {checked} Python modules and 6 image assets match source.")

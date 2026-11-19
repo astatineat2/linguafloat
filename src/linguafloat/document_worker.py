@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import sys
@@ -202,7 +203,15 @@ def execute(job, key, store, control, emit, translator=None):
                 for number, regions in layout.get("untranslated_regions", {}).items():
                     for index, region in enumerate(regions, 1):
                         origin = "左上角" if region.get("coordinates") == "top-left" else "左下角"
-                        box = ", ".join(f"{v:.1f}" for v in region["box"])
+                        # Navigation failures retain one issue spanning several labels.
+                        boxes = [region["box"]] if "box" in region else region.get("boxes", [])
+                        if (not isinstance(boxes, (list, tuple)) or not boxes or any(
+                                not isinstance(rect, (list, tuple)) or len(rect) != 4
+                                or any(type(v) not in (int, float) or not math.isfinite(v) for v in rect)
+                                or rect[0] >= rect[2] or rect[1] >= rect[3] for rect in boxes)):
+                            raise DocumentError(f"[未翻译区域坐标无效] 原始第 {int(number) + 1} 页，"
+                                                f"区域 {index} 无法安全记录位置，未发布结果。")
+                        box = "；".join(", ".join(f"{v:.1f}" for v in rect) for rect in boxes)
                         local_issues.append(dict(region, page=int(number) + 1,
                             id=region.get("id", f"P{int(number)+1}-U{index}")))
                         explanation.extend([f"原始第 {int(number) + 1} 页，区域 {index}",

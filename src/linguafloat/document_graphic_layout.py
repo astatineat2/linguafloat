@@ -89,6 +89,10 @@ def native_grid_cells(page, area):
         return []
     cells, headers = [], []
     for grid, table in enumerate(page.find_tables(clip=bounds, strategy='lines').tables):
+        extended = three_line_cells(page, area, words, [table])
+        if extended:
+            cells.extend(extended)
+            continue
         if table.row_count == 1 and table.col_count >= 2 and area['kind'] == 'table':
             headers.append(table)
         if table.row_count < 2 or table.col_count < 2:
@@ -106,7 +110,91 @@ def native_grid_cells(page, area):
                                     grid=grid, native_reliable=reliable))
         if sum(c['native_reliable'] for c in entries) >= max(4, len(entries)*.5):
             cells.extend(entries)
-    return cells or three_line_cells(page, area, words, headers)
+    return cells or three_line_cells(page, area, words, headers) or prose_rule_cells(page, area, words)
+
+
+def prose_rule_cells(page, area, words):
+    """Recover a native three-rule table with measured, empty column gutters.
+
+    A header, a closing rule and at least three aligned row labels are required.
+    This does not infer cells from OCR or from text-block membership alone.
+    """
+    import pymupdf as f
+    if area['kind'] != 'table' or not words:
+        return []
+    bounds = f.Rect(area['box'])
+    rules = []
+    for drawing in sorted(page.get_drawings(), key=lambda d: d['rect'].y0):
+        box = drawing['rect']
+        if box.height > 2 or box.width < bounds.width*.25 or not bounds.intersects(box+(-1,-1,1,1)):
+            continue
+        if rules and abs(box.y0-rules[-1].y0) < 2:
+            if box.x0 <= rules[-1].x1+3 and box.x1 >= rules[-1].x0-3:
+                rules[-1] |= box
+        else:
+            rules.append(f.Rect(box))
+    rules = [b for b in rules if b.width >= bounds.width*.95]
+    if len(rules) != 3 or abs(rules[0].y0-bounds.y0) > 5 or abs(rules[-1].y1-bounds.y1) > 5:
+        return []
+    top, header_end, bottom = rules
+    header = sorted([w for w in words if top.y1 < (w[1]+w[3])/2 < header_end.y0], key=lambda w:w[0])
+    if not header:
+        return []
+    typical = median(w[3]-w[1] for w in header)
+    columns = []
+    for word in header:
+        if not columns or word[0]-columns[-1][-1][2] > typical*1.5:
+            columns.append([])
+        columns[-1].append(word)
+    if len(columns) < 2:
+        return []
+    starts = [c[0][0] for c in columns]
+    members = [[] for _ in columns]
+    for word in words:
+        if not top.y0 < (word[1]+word[3])/2 < bottom.y1:
+            continue
+        col = max((i for i, x in enumerate(starts) if word[0] >= x-2), default=0)
+        members[col].append(word)
+    edges = [top.x0]
+    for left, right in zip(members, members[1:]):
+        end, begin = max(w[2] for w in left), min(w[0] for w in right)
+        if begin-end < typical*.35:
+            return []
+        edges.append((end+begin)/2)
+    edges.append(top.x1)
+    # A wrapped row label is one anchor. The other columns must corroborate
+    # each new anchor, and cannot contribute content above that row's start.
+    labels = []
+    for word in sorted([w for w in members[0] if (w[1]+w[3])/2 > header_end.y1], key=lambda w:w[1]):
+        cy = (word[1]+word[3])/2
+        if labels and cy-labels[-1][-1] < typical*1.1:
+            labels[-1].append(cy)
+        else:
+            labels.append([cy])
+    if len(labels) < 3:
+        return []
+    centers = [min(row) for row in labels]
+    if not all(any(abs((w[1]+w[3])/2-cy) < typical*.4 for col in members[1:] for w in col) for cy in centers):
+        return []
+    bands = [top.y1, header_end.y1]
+    for cy in centers[1:]:
+        previous = [w for col in members for w in col if header_end.y1 < (w[1]+w[3])/2 < cy-typical*.4]
+        following = [w for col in members for w in col if abs((w[1]+w[3])/2-cy) < typical*.4]
+        if not previous or not following:
+            return []
+        bands.append((max(w[3] for w in previous)+min(w[1] for w in following))/2)
+    bands.append(bottom.y0)
+    cells = []
+    for row, (y0, y1) in enumerate(zip(bands, bands[1:]), 1):
+        for column, (x0, x1) in enumerate(zip(edges, edges[1:]), 1):
+            box = f.Rect(x0, y0, x1, y1)
+            native = [w for w in words if box.contains((f.Rect(w[:4]).tl+f.Rect(w[:4]).br)/2)]
+            if not native:
+                return []
+            cells.append(dict(box=list(box), row=row, column=column, grid=0,
+                native_reliable=all('\ufffd' not in w[4] and not any(ord(c)<32 for c in w[4]) for w in native),
+                evidence='native-rules-and-gutters'))
+    return cells
 
 
 def three_line_cells(page, area, words, headers):
@@ -121,7 +209,7 @@ def three_line_cells(page, area, words, headers):
         return []
     bounds = f.Rect(area['box'])
     for table in sorted(headers, key=lambda t: t.col_count, reverse=True):
-        header = [f.Rect(c) for c in table.rows[0].cells if c is not None]
+        header = [f.Rect(c) for c in table.rows[-1].cells if c is not None]
         if (len(header) != table.col_count or table.bbox[2]-table.bbox[0] < bounds.width*.85
                 or abs(table.bbox[1]-bounds.y0) > 12):
             continue
@@ -131,7 +219,7 @@ def three_line_cells(page, area, words, headers):
                   and table.bbox[3]+15 < d['rect'].y0 <= bounds.y1+3]
         if not bottom:
             continue
-        end = max(r.y0 for r in bottom)
+        end = min(r.y0 for r in bottom)
         anchors = []
         for word in sorted(words, key=lambda w: (w[1]+w[3], w[0])):
             box = f.Rect(word[:4])
@@ -159,24 +247,61 @@ def three_line_cells(page, area, words, headers):
         if len(row_labels) < 3:
             continue
         edges = [table.bbox[3], *[(a[-1]+b[0])/2 for a, b in zip(row_labels, row_labels[1:])], end]
-        rows = [header] + [[f.Rect(c.x0, y0, c.x1, y1) for c in header]
-                           for y0, y1 in zip(edges, edges[1:])]
+        rows = [[f.Rect(c) if c else None for c in band.cells] for band in table.rows]
+        rows += [[f.Rect(c.x0, y0, c.x1, y1) for c in header]
+                 for y0, y1 in zip(edges, edges[1:])]
         result = []
         populated = True
         for row, band in enumerate(rows, 1):
             filled = 0
             for column, cell in enumerate(band, 1):
+                if cell is None:
+                    continue
                 native = [w for w in words if cell.contains(
                     (f.Rect(w[:4]).tl+f.Rect(w[:4]).br)/2)]
+                # Empty upper-tier shaded cells do not need an OCR fallback.
+                if row <= table.row_count and not native:
+                    continue
                 reliable = bool(native) and all('\ufffd' not in w[4] and not any(
                     ord(c) < 32 for c in w[4]) for w in native)
                 filled += bool(native)
                 result.append(dict(box=list(cell), row=row, column=column,
                     grid=0, native_reliable=reliable))
-            populated &= filled >= 2
+            populated &= filled >= 2 or row <= table.row_count
         if populated:
             return result
     return []
+
+
+def native_table_regions(page):
+    """Recover populated vector tables the area model omitted.
+
+    A shaded header may be the only ruled grid. Extend it only to a matching
+    closing rule with at least three corroborated data rows in its columns.
+    The caller retains ownership of any enclosing model-detected figure.
+    """
+    import pymupdf as f
+    from linguafloat.document_graphics import visible_native_words
+    words = visible_native_words(page, page.rect)
+    drawings = page.get_drawings()
+    result = []
+    for table in page.find_tables(strategy='lines').tables:
+        if table.col_count < 2:
+            continue
+        box = f.Rect(table.bbox)
+        closing = [d['rect'].y0 for d in drawings if d['rect'].height <= 2
+                   and abs(d['rect'].x0-box.x0) < 3 and abs(d['rect'].x1-box.x1) < 3
+                   and d['rect'].y0 > box.y1+15]
+        if closing:
+            expanded = f.Rect(box.x0, box.y0, box.x1, min(closing))
+            if three_line_cells(page, dict(kind='table', box=list(expanded)), words, [table]):
+                box = expanded
+        populated = sum(bool(text and text.strip()) for row in table.extract() for text in row)
+        if table.row_count < 2 or populated < max(4, table.row_count*table.col_count*.5):
+            continue
+        result.append(dict(kind='table', box=list(box), coordinates='top-left',
+                           confidence=1, evidence='native-table-rules'))
+    return result
 
 
 def native_cell_layout(page, area):
@@ -188,6 +313,21 @@ def native_cell_layout(page, area):
         b = f.Rect(region['box'])
         entry = next((c for c in area.get('cells', []) if
                       (f.Rect(c['box']) + (-.5, -.5, .5, .5)).contains(b)), None)
+        if entry is None and region.get('source') == 'native':
+            own = [f.Rect(v) for v in region.get('source_boxes', [region['box']])]
+            entry = next((c for c in area.get('cells', [])
+                          if c.get('evidence') == 'native-rules-and-gutters'
+                          and all(f.Rect(c['box']).contains((w.tl+w.br)/2) for w in own)), None)
+        if region.get('prose_cell'):
+            # Discovery assigned each word by its center. Ascenders and
+            # descenders can straddle the midpoint between adjacent rows.
+            entry = next((c for c in area.get('cells', [])
+                          if c['box'] == region['cell_box'] and c.get('prose_cell')), None)
+            if entry:
+                result[region['id']] = dict(layout_box=list(f.Rect(entry['box'])+(1,1,-1,-1)),
+                    cell_box=entry['box'], row=entry['row'], column=entry['column'],
+                    geometry='table-rules', native_cell=True)
+                continue
         if entry is None:
             continue
         cell = f.Rect(entry['box']) + (1, 1, -1, -1)
@@ -317,6 +457,9 @@ def table_cells(area, page=None):
         col = min(range(len(starts)),key=lambda i:abs(starts[i]-b.x0))
         y0 = (centers[row-1]+centers[row])/2 if row else max(bounds.y0,centers[0]-(centers[1]-centers[0])/2) if len(centers)>1 else bounds.y0
         y1 = (centers[row]+centers[row+1])/2 if row+1<len(centers) else min(bounds.y1,centers[-1]+(centers[-1]-centers[-2])/2) if len(centers)>1 else bounds.y1
+        # Joined continuations own every original line, not just the row band
+        # around their midpoint. Do not give that ink to neighbouring rows.
+        y0, y1 = min(y0, b.y0), max(y1, b.y1)
         # Centered headers and indented continuation lines are not column
         # separators. Bound this run with neighbours in its own row instead.
         x0 = max(bounds.x0, b.x0)
@@ -533,7 +676,7 @@ def add_side_legend(page, source, records, font_pair):
         return []
     eligible=[r for r in records if r.get('status')=='needs_review'
               and r.get('kind')=='figure' and r.get('translation')
-              and '本组未通过统一排版检查' in r.get('reason','')]
+              and (r.get('legend_eligible') or '本组未通过统一排版检查' in r.get('reason',''))]
     if not eligible:
         return []
     resolver=FitzFontResolver(*font_pair)
@@ -582,7 +725,8 @@ def add_side_legend(page, source, records, font_pair):
                                        color=(.14,.14,.14))
                 record.update(status='legend',legend_number=number,
                               legend_box=[x,y-size,x+width-12,y+len(lines)*line_height],
-                              reason='原位空间不足；译文列于图旁，原图标签和数据保持原样。')
+                              reason=('分类代码与完整说明列于图旁；保留对应原标签。' if record.get('legend_eligible') else
+                                      '原位空间不足；译文列于图旁，原图标签和数据保持原样。'))
             page.show_pdf_page(page.rect,overlay,0)
         return [r for r,_,_,_,_ in placements]
     except FontPolicyError:
@@ -612,15 +756,15 @@ class GraphicFontMetrics:
 def compose_native_headers(source, area, prepared, records):
     """Join validated translations and native scientific runs after cache lookup.
 
-    Only corroborated native first rows qualify. Translation/cache boundaries
-    stay unchanged; a failed member keeps the entire cell on its old safe path.
+    Keep fragment IDs and translations for reporting. Once a body cell is
+    selected for reflow, its fragments may never fall back to individual fits.
     """
     import pymupdf as f
     from linguafloat.document_graphics import glyph_patch
     if area['kind'] != 'table':
         return prepared
-    headers = [c for c in area.get('cells', []) if c['row'] == 1 and c['native_reliable']]
-    eligible = [e for e in prepared if e[0].get('row') == 1 and e[0].get('native_cell')
+    headers = [c for c in area.get('cells', []) if (c['row'] == 1 or c.get('prose_cell')) and c['native_reliable']]
+    eligible = [e for e in prepared if (e[0].get('row') == 1 or e[0].get('prose_cell')) and e[0].get('native_cell')
                 and e[0].get('source') == 'native' and not e[0].get('rotation')]
     rejected = set()
     for cell in headers:
@@ -629,27 +773,28 @@ def compose_native_headers(source, area, prepared, records):
             (f.Rect(r['box']).tl+f.Rect(r['box']).br)/2)}
         members = [e for e in eligible if e[0]['cell_box'] == cell['box']]
         if expected != {e[0]['id'] for e in members}:
+            members = [e for e in prepared if e[0]['id'] in expected]
             rejected.update(e[0]['id'] for e in members)
             for entry in members:
                 records.append(dict(entry[2],status='needs_review',translation=entry[3],
-                    reason='同一表头存在未成功或已跳过的片段，整格保留原文，避免半译及符号错配。'))
+                    reason='同一单元格存在未成功或已跳过的片段，整格保留原文。'))
     prepared = [e for e in prepared if e[0]['id'] not in rejected]
     eligible = [e for e in eligible if e[0]['id'] not in rejected]
-    natural_columns = {e[0]['column'] for e in eligible}
-    if len(natural_columns) < 2:
-        return prepared
+    natural_columns = {e[0]['column'] for e in eligible if e[0]['row'] == 1}
     data_columns = {c['column'] for c in area.get('cells', []) if c['row'] > 1
         and any(f.Rect(c['box']).contains((f.Rect(r['box']).tl+f.Rect(r['box']).br)/2)
                 for r in area['regions'])}
-    if data_columns and len(natural_columns-data_columns) < 1:
-        return prepared  # Prose-filled rows alone do not prove a header.
+    verified_headers = len(natural_columns) >= 2 and (not data_columns or bool(natural_columns-data_columns))
     output, consumed = [], set()
     for cell in headers:
+        if cell['row'] == 1 and not verified_headers:
+            continue
         bounds = f.Rect(cell['box'])
         expected = [r for r in area['regions'] if bounds.contains(
             (f.Rect(r['box']).tl+f.Rect(r['box']).br)/2)]
         members = [e for e in eligible if e[0]['cell_box'] == cell['box']]
-        if {r['id'] for r in expected} != {e[0]['id'] for e in members}:
+        if (not eligible or (cell.get('prose_cell') and not members)
+                or {r['id'] for r in expected} != {e[0]['id'] for e in members}):
             continue
         words = []
         for line in area['lines']:
@@ -657,11 +802,9 @@ def compose_native_headers(source, area, prepared, records):
                 continue
             for word in line.get('words', []) or [line]:
                 if bounds.contains((f.Rect(word['box']).tl+f.Rect(word['box']).br)/2):
-                    words.append(dict(word, baseline=line.get('baseline', word['box'][3])))
-        if not words:
-            continue
+                    words.append(dict(word, baseline=word.get('baseline') or line.get('baseline') or word['box'][3]))
         # Reconstruct visual reading order by baseline, not superscript top.
-        typical = median(w.get('size', 8) for w in words)
+        typical = median(w.get('size', 8) for w in words) if words else 0
         rows = []
         for word in sorted(words, key=lambda w:w['baseline']):
             if not rows or abs(word['baseline']-rows[-1][0]['baseline']) > typical*.65:
@@ -688,19 +831,29 @@ def compose_native_headers(source, area, prepared, records):
             else:
                 parts.append(dict(text=word['text'], clip=word['box'],
                                   baseline=word['baseline']))
-        if added != {e[0]['id'] for e in members}:
+        if not words or added != {e[0]['id'] for e in members}:
+            for r, _, record, value in members:
+                consumed.add(r['id'])
+                records.append(dict(record,status='needs_review',translation=value,
+                    reason='无法确认单元格内全部原文字形，整格保留原文。'))
             continue
         region = dict(members[0][0] if members else eligible[0][0])
         region.pop('_fit_failure', None)
-        region.update(id=f"{area['id']}-header-{cell.get('grid', 0)}-{cell['column']}",
+        region.pop('source_text', None)  # Verify all source boxes, not the first member's text.
+        region.update(id=f"{area['id']}-cell-{cell.get('grid', 0)}-{cell['row']}-{cell['column']}",
             box=list(bounds), source_boxes=[w['box'] for w in words], text=' '.join(w['text'] for w in words),
             cell_box=list(bounds), layout_box=list(bounds+(.65,.65,-.65,-.65)),
-            row=1, column=cell['column'], header_cell=True, header_parts=parts,
-            group=f"{area['id']}-header-{cell.get('grid', 0)}",
+            row=cell['row'], column=cell['column'], header_cell=cell['row']==1,
+            prose_cell=bool(cell.get('prose_cell')), header_parts=parts,
+            group=(f"{area['id']}-header-{cell.get('grid', 0)}" if cell['row'] == 1 else
+                   f"{area['id']}-prose-{cell.get('grid', 0)}-{cell['row']}-{cell['column']}"),
             _header_members=[e[2] for e in members],
             _header_translations=[e[3] for e in members])
         patch, reason = glyph_patch(source, region)
         if reason:
+            for r, _, record, value in members:
+                consumed.add(r['id'])
+                records.append(dict(record,status='needs_review',translation=value,reason=reason))
             continue
         record = {k:v for k,v in region.items() if not k.startswith('_') and k != 'header_parts'}
         record['page'] = source.number+1
@@ -710,7 +863,8 @@ def compose_native_headers(source, area, prepared, records):
 
 
 def fit_header(page, region, target, control, size, source):
-    """Measure and center complete mixed header lines; copy science as vectors."""
+    """Fit mixed runs: center headers, keep body paragraphs at their reading edge."""
+    from collections import Counter
     import re
     import pymupdf as f
     from linguafloat.document_graphics import native_erase_boxes
@@ -718,27 +872,32 @@ def fit_header(page, region, target, control, size, source):
     box = f.Rect(region['layout_box'])
     font = f.Font({'ja':'japan','ko':'korea'}.get(target,'china-s')) if resolver is None else None
     parts = region['header_parts']
+    body = region.get('prose_cell', False)
     if font is not None:
         missing = [f'U+{ord(c):04X}' for part in parts if 'clip' not in part
                    for c in part['text'] if not c.isspace() and not font.has_glyph(ord(c))]
         if missing:
             region['_fit_failure'] = '目标字体缺少字形 '+', '.join(dict.fromkeys(missing))+'；完整表头保留原文。'
             return None
-    native_chars = [(s['size'], c) for b in source.get_text('rawdict')['blocks']
+    native_chars = [(s['size'], c) for b in source.get_text('rawdict',flags=f.TEXTFLAGS_WORDS)['blocks']
         for l in b.get('lines', []) for s in l['spans'] for c in s['chars'] if not c['c'].isspace()]
     with f.open() as artwork, f.open() as canvas, f.open() as overlay:
         atoms = []
         for part in parts:
             if 'clip' in part:
                 clip = f.Rect(part['clip'])
-                artwork.insert_pdf(source.parent, from_page=source.number, to_page=source.number)
-                art = artwork[-1]
                 # Isolate every native run, not just translated prose. An upper
                 # row's word box can intersect a lower row's scientific script.
-                unwanted = [c['bbox'] for _,c in native_chars
-                    if f.Rect(region['cell_box']).contains((f.Rect(c['bbox']).tl+f.Rect(c['bbox']).br)/2)
-                    and not (clip+(-.02,-.02,.02,.02)).contains(f.Rect(c['bbox']))]
+                padded = clip+(-.02,-.02,.02,.02)
+                # A Form clip can still expose a neighbouring character to
+                # text extraction after its coordinates are transformed.
+                guard = clip+(-clip.height,-clip.height,clip.height,clip.height)
+                nearby = [(sz,c) for sz,c in native_chars if guard.intersects(c['bbox'])]
+                unwanted = [c['bbox'] for _,c in nearby if not padded.contains(c['bbox'])]
+                art_doc, art_page = source.parent, source.number
                 if unwanted:
+                    artwork.insert_pdf(source.parent, from_page=source.number, to_page=source.number)
+                    art = artwork[-1]
                     erasures = native_erase_boxes(source, dict(box=region['box'], source_boxes=unwanted))
                     if not erasures:
                         region['_fit_failure'] = '科学字形与邻行字符无法可靠分离，整格保留原文。'
@@ -746,17 +905,17 @@ def fit_header(page, region, target, control, size, source):
                     for b in erasures:
                         art.add_redact_annot(f.Rect(b), fill=False, cross_out=False)
                     art.apply_redactions(images=0, graphics=0, text=0)
-                art_page = len(artwork)-1
+                    art_doc, art_page = artwork, len(artwork)-1
                 # Original baselines can be taken from a superscript-only line.
                 # The largest native character size identifies its base tier.
-                chars = [(sz, c['origin'][1]) for sz,c in native_chars
-                    if (clip+(-.02,-.02,.02,.02)).contains(f.Rect(c['bbox']))]
+                chars = [(sz, c['origin'][1]) for sz,c in nearby if padded.contains(c['bbox'])]
                 baseline = median(y for sz,y in chars if sz >= max(t for t,_ in chars)*.9) if chars else part['baseline']
                 atom = dict(part, width=clip.width, ascent=baseline-clip.y0,
-                            descent=clip.y1-baseline, vectors=[(clip, 0, baseline, art_page)],
+                            descent=clip.y1-baseline, vectors=[(clip, 0, baseline, art_doc, art_page)],
                             last_clip=clip, last_baseline=baseline, anchor=baseline,
                             native_size=max((sz for sz,_ in chars), default=clip.height), last_dx=0)
-                if atoms and atoms[-1].get('vectors'):
+                atom['item_start'] = bool(region.get('prose_cell') and re.fullmatch(r'\(\d+\)', part['text']))
+                if atoms and atoms[-1].get('vectors') and not atom['item_start']:
                     previous = atoms[-1]
                     last = previous['last_clip']
                     native_size = max(previous['native_size'], atom['native_size'])
@@ -769,7 +928,7 @@ def fit_header(page, region, target, control, size, source):
                         atom['ascent'], atom['descent'] = baseline-clip.y0, clip.y1-baseline
                     gap = native_size*.24 if re.search(r'[A-Za-z.]$', previous['text']) and re.match(r'[A-Za-z0-9]', part['text']) else native_size*.12
                     offset = previous['last_dx']+clip.x0-last.x0 if same_tier else previous['width']+gap
-                    previous['vectors'].append((clip, offset, baseline, art_page))
+                    previous['vectors'].append((clip, offset, baseline, art_doc, art_page))
                     previous['width'] = max(previous['width'], offset+clip.width)
                     previous['ascent'] = max(previous['ascent'], atom['ascent'])
                     previous['descent'] = max(previous['descent'], atom['descent'])
@@ -781,14 +940,17 @@ def fit_header(page, region, target, control, size, source):
                 continue
             value = re.sub(r'(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])', '', part['text'])
             metrics = GraphicFontMetrics(resolver, value, part['bold'], part['italic']) if resolver else font
-            for token in re.findall(r'[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*|[^\s]', value):
+            for match in re.finditer(r'[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*|[^\s]', value):
+                token = match[0]
+                if body and match.start() and value[match.start()-1].isspace():
+                    token = ' '+token
                 atoms.append(dict(text=token, width=metrics.text_length(token, fontsize=size),
                     ascent=metrics.ascender*size, descent=-metrics.descender*size,
                     bold=part['bold'], italic=part['italic']))
         # Keep bracketed units and protected clusters together whenever they fit.
         chunks, current, depth = [], [], 0
         for atom in atoms:
-            if atom['text'][0] in '([\uff08':
+            if atom['text'].lstrip()[0] in '([\uff08':
                 depth += 1
             current.append(atom)
             if atom['text'][-1] in ')]\uff09':
@@ -801,12 +963,16 @@ def fit_header(page, region, target, control, size, source):
                   ([chunk] if sum(a['width'] for a in chunk) <= box.width else [[a] for a in chunk])]
         lines, line = [], []
         for chunk in chunks:
+            if line and chunk[0].get('item_start'):
+                lines.append(line); line=[]
             if line and sum(a['width'] for a in line+chunk) > box.width:
                 # Opening punctuation belongs with the following content.
                 carry = []
                 while line and line[-1]['text'] in '([\uff08':
                     carry.insert(0, line.pop())
-                lines.append(line); line=carry
+                if line:
+                    lines.append(line)
+                line=carry
             line.extend(chunk)
         if line:
             lines.append(line)
@@ -822,10 +988,10 @@ def fit_header(page, region, target, control, size, source):
         p = canvas.new_page(width=box.width+20, height=box.height+20)
         if font:
             p.insert_font(fontname='LFHeader', fontbuffer=font.buffer)
-        y = 10+(box.height-height)/2
+        y = 10 if body else 10+(box.height-height)/2
         geometry = []
         for line, (ascent, descent) in zip(lines, dimensions):
-            x = 10+(box.width-sum(a['width'] for a in line))/2
+            x = 10 if body else 10+(box.width-sum(a['width'] for a in line))/2
             baseline = y+ascent
             positioned = []
             for atom in line:
@@ -834,10 +1000,10 @@ def fit_header(page, region, target, control, size, source):
             # Vector clips go first; their background must not paint new text.
             for atom,x in positioned:
                 if atom.get('vectors'):
-                    for clip, dx, original_baseline, art_page in atom['vectors']:
+                    for clip, dx, original_baseline, art_doc, art_page in atom['vectors']:
                         dest = f.Rect(x+dx, baseline+clip.y0-original_baseline,
                                       x+dx+clip.width, baseline+clip.y1-original_baseline)
-                        p.show_pdf_page(dest, artwork, art_page, clip=clip)
+                        p.show_pdf_page(dest, art_doc, art_page, clip=clip)
             for atom,x in positioned:
                 if not atom.get('vectors'):
                     if resolver:
@@ -847,22 +1013,37 @@ def fit_header(page, region, target, control, size, source):
                         p.insert_text((x,baseline), atom['text'], fontname='LFHeader', fontsize=size, color=(.12,.12,.12))
             geometry.append(dict(width=sum(a['width'] for a in line), text=''.join(a['text'] for a in line)))
             y += ascent+descent+size*.08
-        actual = [f.Rect(c['bbox']) for b in p.get_text('rawdict')['blocks']
-                  for l in b.get('lines', []) for s in l['spans'] for c in s['chars'] if not c['c'].isspace()]
-        if not actual:
+        chars = [c for b in p.get_text('rawdict',flags=f.TEXTFLAGS_WORDS)['blocks']
+                 for l in b.get('lines', []) for s in l['spans'] for c in s['chars'] if not c['c'].isspace()]
+        if not chars:
             return None
+        if body and Counter(c['c'] for c in chars) != Counter(''.join(
+                ''.join(a['text'].split()) for a in atoms)):
+            region['_fit_failure'] = '实际字形与整格内容不一致，保留原文。'
+            return None
+        actual = [f.Rect(c['bbox']) for c in chars]
         ink = f.Rect(actual[0])
         for bound in actual[1:]:
             ink |= bound
         dx,dy = 10+box.width/2-(ink.x0+ink.x1)/2, 10+box.height/2-(ink.y0+ink.y1)/2
+        if body:
+            # Preserve the column's reading edge and first line, bounded by
+            # the available cell when a translation needs more room.
+            x0 = min(b[0] for b in region['source_boxes'])
+            y0 = min(b[1] for b in region['source_boxes'])
+            dx = 10+max(0,min(x0-box.x0,box.width-ink.width))-ink.x0
+            dy = 10+max(0,min(y0-box.y0,box.height-ink.height))-ink.y0
         if not f.Rect(10,10,10+box.width,10+box.height).contains(ink+(dx,dy,dx,dy)):
             region['_fit_failure'] = '表头实际字形超出完整单元格；未覆盖相邻内容。'
             return None
         out = overlay.new_page(width=page.rect.width, height=page.rect.height)
         out.show_pdf_page(box, canvas, 0, clip=f.Rect(10-dx,10-dy,10+box.width-dx,10+box.height-dy))
-        metadata = dict(size=size, rows=len(lines), layout_box=list(box), row=1,
-            column=region['column'], header_cell=True, header_content=''.join(a['text'] for a in atoms),
-            header_lines=geometry, native_vectors=True)
+        metadata = dict(size=size, rows=len(lines), layout_box=list(box), row=region.get('row'),
+            column=region['column'], header_cell=not body, native_vectors=any(a.get('vectors') for a in atoms))
+        if body:
+            metadata.update(prose_cell=True, cell_lines=geometry)
+        else:
+            metadata.update(header_content=''.join(a['text'] for a in atoms), header_lines=geometry)
         if resolver:
             metadata['font_policy'] = resolver.report()
         return overlay.tobytes(), metadata
@@ -965,7 +1146,9 @@ def clear_of_original(source, group, overlays):
             for box in r.get('erase_boxes', r.get('source_boxes', [r['box']])):
                 p.add_redact_annot(f.Rect(box),fill=False,cross_out=False)
         p.apply_redactions(images=0,graphics=0,text=0)
-        for r,patch,_,_ in group:p.insert_image(f.Rect(patch[1]),stream=patch[0],mask=patch[2])
+        for r,patch,_,_ in group:
+            if r.get('source') != 'native':
+                p.insert_image(f.Rect(patch[1]),stream=patch[0],mask=patch[2])
         pix=p.get_pixmap(matrix=f.Matrix(4,4),clip=rect,colorspace=f.csGRAY)
         retained=np.frombuffer(pix.samples,np.uint8).reshape(pix.height,pix.width)<150
         occupied=retained.copy()

@@ -171,6 +171,35 @@ def _characters(page, rect):
     return sorted(found)
 
 
+def _same_shifted_label(source, page, box):
+    """Allow engine-shifted words only if every visible glyph is still accounted for."""
+    import pymupdf as f
+    def runs(p):
+        result = []
+        # Texttrace includes clipped-out XObject copies. Structured extraction
+        # honours their clips; _characters already checks partial intersections.
+        data = p.get_text('rawdict',clip=box+(-.2,-.2,.2,.2),flags=f.TEXTFLAGS_RAWDICT & ~f.TEXT_PRESERVE_IMAGES)
+        for block in data['blocks']:
+            for line in block.get('lines',[]):
+                if tuple(line['dir']) != (1,0):
+                    return []
+                for span in line['spans']:
+                    if span.get('alpha',255) != 255:
+                        return []
+                    result.extend((c['c'],span['font'],span['size'],span['color'],f.Rect(c['bbox']))
+                                  for c in span['chars'] if not c['c'].isspace())
+        return result
+    left,right = runs(source),runs(page)
+    if not left or len(left) != len(right):
+        return False
+    for a,b in zip(left,right):
+        r,s = a[-1],b[-1]
+        if (a[:-1] != b[:-1] or abs(r.y0-s.y0)>.1 or abs(r.y1-s.y1)>.1 or
+                abs(r.width-s.width)>.1 or abs(r.x0-s.x0)>a[2]*2):
+            return False
+    return True
+
+
 def _erase(page, boxes):
     # MuPDF removes touched links along with text, leaving a stale link chain.
     # Keep the original annotation array (and native xrefs) instead of rebuilding
@@ -218,7 +247,7 @@ def render_navigation(source, page, group, translations, *, font_pair=('SimSun',
     boxes = [f.Rect(i['box']) for i in items]
     for box in boxes:
         native = _characters(source, box)
-        if not native or _characters(page, box) != native:
+        if not native or (_characters(page, box) != native and not _same_shifted_label(source,page,box)):
             raise NavigationError('导航目标页尚未恢复原文或包含其他文字')
     resolver = FitzFontResolver(*font_pair)
     with f.open() as trial, f.open() as overlay:

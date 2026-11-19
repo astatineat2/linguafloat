@@ -1,12 +1,12 @@
 # 浮译 LinguaFloat
 
-当前版本：**v0.19.3**。可靠原生表格的中文表头按完整单元格紧凑排版与居中，科学标识保留原始矢量字形及上下标。独立表格随正文默认翻译，图片通过“图片翻译”按需补译；不改变表格数据、正文及图片布局。下载与验证边界见[本版发布说明](docs/public/发布说明-v0.19.3.md)。
+当前公开便携版：**v0.19.6**。独立表格仍随正文翻译；图片补译仅在整张图能安全排入时写入，困难图片按图保留。混合版式可复用与文件及字体匹配的本机校对页，未知扫描件仍执行识别与校验。
 
-本版提供完整 Windows x64 便携包、匹配的对应源码和校验文件，不提供新安装程序。源码继续公开；此前暂停的安装验收未恢复。
+本地 Windows x64 正式入口为 `exe/LinguaFloat.exe`，本版提供手动下载，不提供新安装程序；此前暂停的安装验收未恢复。
 
 **面向大学生、科研学习者的 Windows 桌面翻译工具。**
 
-[下载 v0.19.3](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.3) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
+[下载 v0.19.6](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.6) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
 
 LinguaFloat 是一个桌面翻译工具：翻译游戏屏幕上的外文对话、把你想说的中文转成英文发出去，在任意窗口选中文本即译，以及基于开源组件翻译 PDF、Word 和 PowerPoint 文档并保留原有排版。游戏交流、日常学习和文献翻译，不必再开三个工具来回倒。
 
@@ -29,9 +29,9 @@ LinguaFloat 是一个桌面翻译工具：翻译游戏屏幕上的外文对话�
 
 ## 下载与开始使用
 
-当前版本：**v0.19.3 · Windows x64**。提供完整便携 ZIP，下载后核对同版 `SHA256SUMS.txt`；无需下载对应源码才能使用。安装验收仍暂停，详见[发布说明](docs/public/发布说明-v0.19.3.md)。
+当前公开下载：**v0.19.6 · Windows x64**。提供完整便携 ZIP，下载后核对同版 `SHA256SUMS.txt`；无需下载对应源码才能使用。签名自动更新通道不变。安装验收仍暂停，详见[公开版发布说明](docs/public/发布说明-v0.19.6.md)。
 
-1. 前往 [v0.19.3 下载页](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.3)，下载 `LinguaFloat-v0.19.3-win-x64.zip`。
+1. 前往 [v0.19.6 下载页](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.6)，下载 `LinguaFloat-v0.19.6-win-x64.zip`。
 2. 完整解压到有写入权限的目录，运行 `LinguaFloat.exe`。**无需安装 Python**；请保留 `_internal`、`document-runtime` 和更新助手，不要只复制 EXE。
 3. 首次进入可配置翻译服务并保存，或跳过后从配置入口设置。保存不会自动请求接口；“获取模型”和实际翻译由用户主动触发。详细步骤见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
 
@@ -41,7 +41,23 @@ LinguaFloat 是一个桌面翻译工具：翻译游戏屏幕上的外文对话�
 
 取词和游戏画面兼容性因软件而异；独占全屏或受保护画面可能无法截图。复杂扫描件、图表和公式的译文排版需要检查，不保证所有文件无损还原。当前程序没有 Windows Authenticode 签名；下载及更新校验、网络说明见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
 
-## 当前版本 · v0.19.3
+## 历史本地版本 · v0.19.5
+
+- 科学字符、化学定位数字及等价范围按结构校验；不放宽科研数值保护。
+- 长说明整格排版、自然语言斜杠标签、窄标题及重复出版页脚安全恢复。
+- 参考文献换行期号不再打断续页判断；附录、致谢与方法仍独立处理。
+- 六份正文参与验证，Bifido 复杂表单仍有局部保留，具体数量与原因见本地验证记录。Walnut 图片仅第 3 页部分补译。
+
+## 此前本地版本 · v0.19.4
+
+- 兼容单框和多框局部失败记录，保留原文、警告和输出，不再因保存说明读取 `box` 而整体失败。
+- 比例符号使用用户所选中文字体，科学量与标识的源字形边界完整保护；不放宽数值校验。
+- 恢复有原生结构证据的漏检表格、跨行表格文字和参考文献续页；纯轮廓文字页转入已有 OCR 流程。
+- 实际文档缓存重放不等于新一轮全文翻译验收；低置信度 OCR、彩色图线与排版空间不足继续保留原文并记录。
+
+## 当前公开版 · v0.19.6
+
+- 图片无法完整安全排入时保留整图；修复短图注边界与裁切范围外的隐藏复制文字。
 
 - 中文混合科学表头整格居中，保留原始科学字形与上下标；独立表格默认随正文处理，图片按需补译。
 - 改善日期、作者联系方式、样式与数值保护、任务状态及请求诊断；保留局部失败原文和合格缓存。

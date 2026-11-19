@@ -227,7 +227,7 @@ def translate_graphics_only(job, translator, output, emit, *, store=None):
     from linguafloat.document_context import SourceBlock
     from linguafloat.document_graphics import DocumentEnhancer, apply_graphics
     from linguafloat.document_failures import mark_pdf
-    from linguafloat.document_pdf import append_bilingual, open_document
+    from linguafloat.document_pdf import append_bilingual, open_document, restore_bilingual_source_links
     from linguafloat.document_metrics import active_clock
     data = validate_graphics_source(store or getattr(translator, "store", None), job.parent_job_id,
         job.graphics_source, source=job.source, provider=job.provider, job=job, control=translator.control)
@@ -238,6 +238,7 @@ def translate_graphics_only(job, translator, output, emit, *, store=None):
     label = "图片补译" if not job.translate_tables else "图表补译"
     started = active_clock(translator.control)
     with open_document(job.source) as source, fitz.open(Path(job.graphics_source) / "body.pdf") as body, fitz.open() as mono, fitz.open() as dual:
+        bilingual_map = []
         for ordinal, row in enumerate(data["pages"], 1):
             translator.control.checkpoint()
             number = row["source"]
@@ -248,18 +249,20 @@ def translate_graphics_only(job, translator, output, emit, *, store=None):
                 if row.get("selected", True):
                     local = apply_graphics(source[number], fragment[0], translator, enhancer.analyzer,
                                            enhancer.digest, job.graphic_overrides.get(enhancer.digest, {}))
-                    if job.translate_figures:
-                        from linguafloat.document_graphic_layout import add_side_legend
-                        add_side_legend(fragment[0], source[number], local,
-                                        (job.chinese_font,job.latin_font))
                     records.extend(local)
                     pending = [r for r in local if r.get("status") == "needs_review"]
                     for index, record in enumerate(pending, 1):
                         record.update(id=f"P{number+1}-G{index}", coordinates="top-left")
                     mark_pdf(fragment[0], pending, number, control=translator.control)
+                    from linguafloat.document_publisher_footer import restore_printed_urls
+                    restore_printed_urls(source[number], fragment[0])
                 mono.insert_pdf(fragment)
                 if job.bilingual:
+                    start = len(dual)
                     append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+                    bilingual_map.append(dict(source=number, start=start, count=len(dual)-start))
+        source_links = restore_bilingual_source_links(
+            dual, source, bilingual_map, job.bilingual_layout, translator.control) if job.bilingual else {}
         paths = []
         for enabled, label, doc in ((job.mono, "译文", mono), (job.bilingual, "双语", dual)):
             if enabled:
@@ -268,6 +271,7 @@ def translate_graphics_only(job, translator, output, emit, *, store=None):
                 paths.append(str(path))
     pending = [r for r in records if r.get("status") == "needs_review"]
     report = dict(mode="graphics_followup", parent_job_id=job.parent_job_id,
+                  source_link_restoration=source_links,
                   reference_boundary=job.reference_boundary, graphics_regions=records,
                   untranslated_regions={}, body_translation_requests=0,
                   transport_partial=getattr(translator, "graphic_failure", None) is not None)

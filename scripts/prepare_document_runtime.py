@@ -31,9 +31,11 @@ def main():
     (destination / "python313._pth").write_text(".\nDLLs\nLib\nLib/site-packages\nimport site\n", encoding="ascii")
     target_source = destination / "src" / "linguafloat"
     target_source.mkdir(parents=True, exist_ok=True)
+    for name in ('document_clip.py','document_reviewed.py','document_glyph_patch.py'):
+        shutil.copy2(project/'src'/'linguafloat'/name,target_source/name)
     for name in ("__init__.py", "api_compat.py", "document_core.py", "document_metrics.py", "document_scheduler.py", "document_artifacts.py", "document_office.py", "document_pdf.py", "document_layout.py", "document_geometry.py", "document_scan_layout.py", "document_scan_recovery.py", "document_scientific.py", "document_worker.py"):
         shutil.copy2(project / "src" / "linguafloat" / name, target_source / name)
-    for name in ("document_failures.py", "document_context.py", "document_frontmatter.py","document_graphics.py", "document_richtext.py", "document_graphic_layout.py", "document_references.py", "document_ocr.py", "document_fonts.py", "document_structure.py", "document_navigation.py", "document_postprocess.py", "document_publication.py"):
+    for name in ("document_failures.py", "document_context.py", "document_frontmatter.py","document_graphics.py", "document_richtext.py", "document_graphic_layout.py", "document_references.py", "document_ocr.py", "document_fonts.py", "document_structure.py", "document_navigation.py", "document_postprocess.py", "document_publication.py", "document_publisher_footer.py", "document_masthead.py"):
         shutil.copy2(project / "src" / "linguafloat" / name,target_source / name)
     shutil.copy2(project / "scripts" / "document_worker_entry.py", destination / "worker_entry.py")
     installed = sorted({f"{d.metadata['Name']}=={d.version}" for d in importlib.metadata.distributions()

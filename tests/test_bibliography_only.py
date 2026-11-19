@@ -101,3 +101,43 @@ def test_reading_appendix_request_and_order(local_layout, tmp_path):
         assert len(mono) == 3
         assert "[1] First study" in mono[1].get_text()
         assert translator.calls == 2
+
+
+def test_reference_projection_preserves_implicit_text_matrix_resets():
+    with fitz.open() as source, fitz.open() as rendered:
+        page = source.new_page(width=600, height=800)
+        page.insert_text((40, 80), "Prefix to replace", fontsize=9)
+        page.insert_text((320, 400), "[1] Native reference", fontsize=9)
+        xref = source.get_new_xref()
+        source.update_object(xref, '<<>>')
+        source.update_stream(xref, b'BT /helv 9 Tf 320 700 Td (Prefix) Tj ET\n'
+                             b'BT /helv 9 Tf 320 360 Td ([2] Tail after implicit reset) Tj ET')
+        contents = page.get_contents()
+        source.xref_set_key(page.xref, 'Contents', '['+' '.join(f'{x} 0 R' for x in [*contents,xref])+']')
+        rendered.insert_pdf(source)
+        retain_pdf_tail(rendered[0], page, dict(boxes=[[300, 350, 600, 800]]))
+        clip = fitz.Rect(300, 350, 600, 800)
+        assert rendered[0].get_text(clip=clip) == page.get_text(clip=clip)
+        for zoom in (1, 2, 4):
+            opts = dict(clip=clip, matrix=fitz.Matrix(zoom, zoom))
+            assert rendered[0].get_pixmap(**opts).samples == page.get_pixmap(**opts).samples
+
+
+def test_actual_reference_projection_preserves_decorations_and_watermark():
+    import os
+    from pathlib import Path
+    fixture = os.environ.get('LINGUAFLOAT_TEST_REFERENCE_PAINT_PDF')
+    if not fixture or not Path(fixture).is_file():
+        pytest.skip('Set local reference paint fixture')
+    with fitz.open(fixture) as source, fitz.open() as rendered, fitz.open() as expected:
+        page = source[8]
+        target = rendered.new_page(width=page.rect.width, height=page.rect.height)
+        target.insert_text((40, 80), 'Translated prefix')
+        clip = fitz.Rect(303.4607238769531, 360.86798095703125, page.rect.width, page.rect.height)
+        retain_pdf_tail(target, page, dict(boxes=[list(clip)]))
+        identity = expected.new_page(width=page.rect.width, height=page.rect.height)
+        identity.show_pdf_page(identity.rect, source, 8)
+        for zoom in (2, 4):
+            opts = dict(clip=clip, matrix=fitz.Matrix(zoom, zoom))
+            assert target.get_pixmap(**opts).samples == identity.get_pixmap(**opts).samples
+        assert target.get_text(clip=clip) == page.get_text(clip=clip)

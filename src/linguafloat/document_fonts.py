@@ -38,7 +38,7 @@ DEFAULT_CHINESE = "SimSun"
 DEFAULT_LATIN = "Times New Roman"
 CHINESE_FONTS = ("SimSun", "Microsoft YaHei")
 LATIN_FONTS = (DEFAULT_LATIN,)
-_VERSION = "windows-fonts-v1"
+_VERSION = "windows-fonts-v2"
 _STROKE_EM = .025
 _SHEAR = math.tan(math.radians(12))
 _PATCH_LOCK = threading.Lock()
@@ -190,7 +190,9 @@ def validate_fonts(chinese="", latin="", *, fonts_dir=None) -> ValidatedFonts:
 
 def _is_cjk(char: str) -> bool:
     point = ord(char)
-    return (unicodedata.east_asian_width(char) in ("W", "F") or
+    # RATIO is neutral-width: route it explicitly to the selected Chinese face.
+    # Times lacks it; preserve U+2236 and still reject missing glyphs there.
+    return (point == 0x2236 or unicodedata.east_asian_width(char) in ("W", "F") or
             0x2E80 <= point <= 0xA4CF or 0xAC00 <= point <= 0xD7AF or
             0xF900 <= point <= 0xFAFF or 0x20000 <= point <= 0x323AF)
 

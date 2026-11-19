@@ -269,6 +269,30 @@ class LayoutPolicy:
                   and re.search(r"[\u4e00-\u9fff]", p.unicode or "")]
         for paragraph in list(page.pdf_paragraph):
             text = (paragraph.unicode or "").strip()
+            if paragraph.layout_label == 'fallback_line' and re.fullmatch(r'[A-Za-z]', text) and paragraph.box:
+                x0, y0, x1, y1 = bounds(paragraph)
+                middle = (y0+y1)/2
+                words = self.source_words.get(page.page_number, [])
+                matches = [(a,b,c,d) for word,(a,b,c,d) in words if len(word) >= 4 and word.isascii()
+                           and word.isalpha() and word.endswith(text) and a < x0-.5 and b <= middle <= d
+                           and abs(c-x1) <= 1.5]
+                if len(matches) == 1:
+                    a,b,c,d = matches[0]
+                    if any(p.xobj_id == paragraph.xobj_id and p.box.x <= a+.5
+                           and abs(p.box.x2-x0) <= 1.5 and p.box.y <= middle <= p.box.y2
+                           for p in titles):
+                        from linguafloat.document_geometry import owns
+                        from linguafloat.document_scientific import composition_chars
+                        parts = paragraph.pdf_paragraph_composition
+                        native = [ch.char_unicode for ch in self.source_characters.get(page.page_number, [])
+                                  if ch.xobj_id == paragraph.xobj_id and owns(paragraph.box, ch)
+                                  and (ch.char_unicode or '').strip()]
+                        if ((not native or native == [text])
+                                and not any(p.pdf_formula and (p.pdf_formula.pdf_curve or p.pdf_formula.pdf_form) for p in parts)
+                                and all(ch.char_unicode in (text, ' ') for p in parts for ch in composition_chars(p))):
+                            page.pdf_paragraph.remove(paragraph)
+                            self.geometry_repairs.append(dict(page=page.page_number+1, kind='split_title_word_tail', box=[x0,y0,x1,y1]))
+                            continue
             if paragraph.layout_label != "abandon" or not re.fullmatch(r"[A-Za-z]", text) or not paragraph.box:
                 continue
             box = bounds(paragraph)
@@ -372,7 +396,7 @@ class LayoutPolicy:
             if neighbors:
                 candidate = Box(original.x, original.y, max(b.x2 for b in neighbors), original.y2)
                 if not any(intersection(bounds(candidate), o) > intersection(bounds(original), o)+.01 for o in obstacles):
-                    boxes.extend(expanded_boxes(candidate, obstacles, bounds(page.cropbox)))
+                    boxes = list(expanded_boxes(candidate, obstacles, bounds(page.cropbox))) + boxes
         # Some publisher columns leave a 30pt slot for three 9pt lines. The
         # previous 1.2 minimum forced these short paragraphs down to 6pt.
         # Try readable native size with a modest 1.1 leading first; the ink
@@ -734,8 +758,10 @@ class LayoutPolicy:
                 for paragraph in page.pdf_paragraph:
                     policy.paragraph_pages[id(paragraph)] = page
                 filter_layout_paragraphs(page, policy.reference_boundary, policy.retain_error)
-                from linguafloat.document_geometry import attach_detached_citations
+                from linguafloat.document_geometry import attach_detached_citations, repair_split_captions
                 policy.geometry_repairs.extend(dict(page=page.page_number+1, **c) for c in attach_detached_citations(page))
+                policy.geometry_repairs.extend(dict(page=page.page_number+1, **c) for c in
+                    repair_split_captions(page, policy.source_words.get(page.page_number, [])))
                 for index, paragraph in enumerate(page.pdf_paragraph):
                     locations[id(paragraph)] = f"原始第 {page.page_number + 1} 页 · 段落 {index + 1}"
             translator = policy.scientific.translator if policy.scientific else None

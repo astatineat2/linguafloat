@@ -113,9 +113,118 @@ def composition_chars(composition):
     return [composition.pdf_character] if composition.pdf_character else []
 
 
+def join_partial_scientific_tokens(paragraph):
+    """Complete parser-split quantities/IDs using only original PDF glyphs.
+
+    A formula slot can own the middle of a decimal range or an identifier's
+    final digit. Translating the neighbouring pieces independently cannot
+    preserve that logical token. Only spans touching an existing formula are
+    joined; unrelated prose, punctuation and normal numbers stay unchanged.
+    """
+    from babeldoc.format.pdf.document_il import Box, PdfFormula, PdfParagraphComposition
+    parts = paragraph.pdf_paragraph_composition
+    if not any(p.pdf_formula for p in parts):
+        return
+    atoms, offsets, tokens, cursor = [], [], [], 0
+    size = paragraph.pdf_style.font_size if paragraph.pdf_style else 0
+    previous = None
+    for part in parts:
+        children = ([part] if part.pdf_formula or not composition_chars(part) else
+                    [PdfParagraphComposition(pdf_character=c) for c in composition_chars(part)])
+        for child in children:
+            child_chars = composition_chars(child)
+            token = ''.join(c.char_unicode or '' for c in child_chars)
+            first = next((c for c in child_chars if (c.char_unicode or '').strip()), None)
+            # Extraction can omit a visible word gap. This separator only guides
+            # token matching; the original glyphs and their order stay untouched.
+            if (previous and first and tokens and tokens[-1][-1:].isalnum()
+                    and token[:1].isalnum() and previous.box and first.box and size
+                    and (abs(first.box.y-previous.box.y) < size*.2
+                         or (abs(first.box.y-previous.box.y) < size*.7
+                             and any(c.pdf_style and (c.pdf_style.font_size or size) < size*.85
+                                     for c in (previous, first))))
+                    and first.box.x-previous.box.x2 > size*.22):
+                tokens.append(' ')
+                cursor += 1
+            atoms.append(child)
+            offsets.append((cursor, cursor + len(token)))
+            tokens.append(token)
+            cursor += len(token)
+            if token:
+                previous = next((c for c in reversed(child_chars)
+                                 if (c.char_unicode or '').strip()), None)
+    text = ''.join(tokens)
+    number = r'[-+\u2212]?\d+(?:\.\d+)?(?:[eE][-+\u2212]?\d+)?'
+    identifier = r'[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*(?![A-Za-z0-9_])'
+    # A unit can touch a number in the extracted IL even when its PDF glyphs
+    # have a word gap. Never backtrack into a decimal/range just to exclude it.
+    quantity = (number + r'(?:[\u2212\u2013-]' + number + r')?[%\uff05]?'
+                r'(?![0-9_]|\.\d|[eE][-+\u2212]?\d|[\u2212\u2013-]\d)')
+    pattern = r'(?<![A-Za-z0-9_.])(?:' + identifier + '|' + quantity + ')'
+    groups = []
+    for match in re.finditer(pattern, text):
+        members = {i for i, (a, b) in enumerate(offsets) if a < match.end() and b > match.start()}
+        formulas = [i for i in members if atoms[i].pdf_formula]
+        if not formulas or len(members) <= 1:
+            continue
+        def spills_outside_token(i):
+            a, b = offsets[i]
+            before, after = text[a:match.start()].strip(), text[match.end():b].strip()
+            # A native slot can already own the unit prefix after the fraction.
+            # Keep that slot whole; do not consume any following prose glyphs.
+            unit_tail = (after in {'μ', 'µ'} and a > match.start() and
+                         re.fullmatch(r'[-+−]?\d+\.\d+', match[0]) and
+                         re.fullmatch(r'\d+', text[a:match.end()]))
+            return before or (after and not unit_tail)
+
+        if any(spills_outside_token(i) for i in formulas):
+            continue  # Never split a larger pre-existing equation to complete a token.
+        chars = [c for i in sorted(members) for c in composition_chars(atoms[i])]
+        painted = [c for c in chars if (c.char_unicode or '').strip()]
+        if (any(c.vertical or not c.box for c in painted)
+                or len({c.xobj_id for c in painted}) > 1):
+            continue
+        bases = [c.box.y for c in painted if c.pdf_style and size
+                 and (c.pdf_style.font_size or 0) >= size*.85]
+        if bases and max(bases)-min(bases) > size*.4:
+            continue  # Paint order alone cannot join tokens across lines/columns.
+        if size and any(b.box.x-a.box.x2 > size*1.5 or b.box.x < a.box.x-size*.25
+                        for a, b in zip(painted, painted[1:])):
+            continue
+        for group in groups[:]:
+            if members & group:
+                members |= group
+                groups.remove(group)
+        groups.append(members)
+    if not groups:
+        return
+    owners = {i:g for g in groups for i in g}
+    result = []
+    for i, part in enumerate(atoms):
+        group = owners.get(i)
+        if group is None:
+            result.append(part)
+            continue
+        if i != min(group):
+            continue
+        selected = [atoms[j] for j in sorted(group)]
+        chars = [c for p in selected for c in composition_chars(p)]
+        originals = [p.pdf_formula for p in selected if p.pdf_formula]
+        boxes = [c.box for c in chars if c.box] + [f.box for f in originals if f.box]
+        box = Box(min(b.x for b in boxes), min(b.y for b in boxes),
+                  max(b.x2 for b in boxes), max(b.y2 for b in boxes))
+        anchor = originals[0]
+        result.append(PdfParagraphComposition(pdf_formula=PdfFormula(box=box, pdf_character=chars,
+            pdf_curve=[c for f in originals for c in f.pdf_curve],
+            pdf_form=[o for f in originals for o in f.pdf_form], x_offset=0,
+            y_offset=box.y-anchor.box.y+(anchor.y_offset or 0), x_advance=0)))
+    paragraph.pdf_paragraph_composition = result
+
+
 def protect_math(paragraph, fonts):
     """Keep embedded glyph IDs, including fonts whose Unicode map is invalid."""
     from babeldoc.format.pdf.document_il import Box, PdfFormula, PdfParagraphComposition
+    join_partial_scientific_tokens(paragraph)
     compositions = paragraph.pdf_paragraph_composition
     chars = [c for part in compositions if not part.pdf_formula for c in composition_chars(part)]
     all_chars = [c for part in compositions for c in composition_chars(part)]
@@ -366,6 +475,10 @@ def merge_formula_runs(parts, size):
     # evidence of a mathematical attachment (e.g. a citation followed by d,).
     for match in re.finditer(r"[.,;:!?]|(?<![A-Za-z])[A-Za-z](?=\s*,)", text):
         blocked.update(i for i, (a, b) in enumerate(offsets) if a < match.end() and b > match.start())
+    # A unit exponent next to a grouped prose value must not acquire just
+    # the last three digits across the punctuation boundary above.
+    for match in re.finditer(r'(?<!\d)\d{1,3}(?:,\d{3})+(?!\d)', text):
+        blocked.update(i for i, (a, b) in enumerate(offsets) if a < match.end() and b > match.start())
     for i, part in enumerate(parts):
         f = part.pdf_formula
         if not f:
@@ -471,24 +584,48 @@ def check_formula_tokens(translate_input, output):
     unknown = set(re.findall(r"\{[vV]\d+\}", output)) - set(re.findall(r"\{[vV]\d+\}", translate_input.unicode))
     if unknown or pattern.findall(output) != pattern.findall(translate_input.unicode):
         return False
+    citations = set()
+    for p in translate_input.placeholders:
+        if not isinstance(p, FormulaPlaceholder) or not p.formula or not (p.formula.y_offset or 0) > 0:
+            continue
+        glyphs = ''.join(c.char_unicode or '' for c in p.formula.pdf_character).strip()
+        prefix = re.sub(r'<[^>]+>', '', translate_input.unicode.partition(p.placeholder)[0])
+        single_after_sentence = (re.fullmatch(r'\d+',glyphs) and re.search(
+            r'(?:[A-Za-z]{2,}\d*|\bv\d+(?:\.\d+)+)\.$', prefix, re.I))
+        if re.fullmatch(r'\d+(?:,\d+)+', glyphs) or single_after_sentence:
+            citations.add(p.placeholder)
     # A formula slot can contain only the fractional digits/unit. Keep the
     # adjacent decimal prefix attached, even when a style closes in between.
     def decimal_edges(text):
         text = re.sub(r'<[^>]+>', '', text)
-        return [(m.group(), prefix.group(0) if (prefix := re.search(
-            r'(?<![A-Za-z0-9_.])[-+\u2212]?\d+\.$', text[:m.start()])) else None)
-            for m in pattern.finditer(text)]
+        edges = []
+        previous_end = 0
+        for m in pattern.finditer(text):
+            if m[0] in citations:
+                # Citation placement is sentence-level. Chinese may move the
+                # identifier within this fragment, but not across its citation.
+                edges.append((m[0],prose_numbers(text[previous_end:m.start()])))
+            else:
+                prefix = re.search(r'(?<![A-Za-z0-9_.])([-+\u2212]?\d+\.)$', text[:m.start()])
+                edges.append((m[0], prefix[1] if prefix else None))
+            previous_end = m.end()
+        return edges
     return decimal_edges(translate_input.unicode) == decimal_edges(output)
 
 
 def prose_numbers(text):
-    """Numbers outside immutable tags/formula slots, including integer values."""
+    """Count every prose value, including both ends of a hyphenated range."""
     from collections import Counter
     from decimal import Decimal
+    from linguafloat.document_context import normalize_numeric_ranges
     text = re.sub(r'\{[vV]\d+\}', ' ', re.sub(r'<[^>]+>', '', text))
-    pattern = r'(?<![0-9_.+\u2212-])[-+\u2212]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?:\s*[%\uff05])?'
-    return Counter((Decimal(m[0].replace('\u2212', '-').rstrip('%\uff05').strip()),
-                    m[0].endswith(('%', '\uff05'))) for m in re.finditer(pattern, text))
+    # Both adjoining bonds are required: a signed measurement or a numeric
+    # range is not a lexical locant such as word-3-acid.
+    text = re.sub(r'(?<=[A-Za-z㐀-鿿])-(?=\d+\s*[-‐‑]\s*[A-Za-z㐀-鿿])', ' ', text)
+    text = normalize_numeric_ranges(text)
+    pattern = r'([-+−]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+−]?\d+)?)(\s*[%％])?'
+    return Counter((Decimal(value.replace('−', '-')), bool(percent))
+                   for value, percent in re.findall(pattern, text))
 
 
 def _formula_fragment_problem(source, text, tokens):
@@ -502,7 +639,11 @@ def _formula_fragment_problem(source, text, tokens):
     if not style_structure_matches(source, text, fragments=True):
         return "片段格式标签丢失、增加或嵌套关系变化"
     from linguafloat.document_context import scientific_quantities
-    if scientific_quantities(source) != scientific_quantities(text):
+    def quantities(value):
+        # pH is a label, not an identifier prefix. Typeset translations may
+        # omit its separating space; the signed reading must still be counted.
+        return scientific_quantities(re.sub(r'(?<![A-Za-z0-9_])pH(?=[+−-]?\d)', 'pH ', value))
+    if quantities(source) != quantities(text):
         return "片段小数、百分比或数量级发生变化"
     if prose_numbers(source) != prose_numbers(text):
         return "片段正文数值发生变化"

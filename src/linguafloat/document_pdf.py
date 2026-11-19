@@ -180,9 +180,15 @@ def render_text_pdf(text, path, page_number):
 def append_bilingual(dual, source, number, fragment, arrangement):
     """A fragment belongs to exactly one source page, including its continuations."""
     import pymupdf as fitz
+    from linguafloat.document_masthead import external_web_uri, restore_masthead_actions
     if arrangement == "alternating":
+        start = len(dual)
         dual.insert_pdf(source, from_page=number, to_page=number)
         dual.insert_pdf(fragment)
+        for index, page in enumerate((source[number], *fragment)):
+            links = [dict(uri=uri, **{'from': link['from']}) for link in page.get_links()
+                     if (uri := external_web_uri(page, link)) and uri.startswith('www.')]
+            restore_masthead_actions(dual[start+index], links)
         return
     original = source[number]
     for index, translated_page in enumerate(fragment):
@@ -202,11 +208,103 @@ def append_bilingual(dual, source, number, fragment, arrangement):
             # These panels use the native page size; external destinations stay exact.
             page = document[page_no]
             for link in page.get_links():
-                if link.get("kind") == fitz.LINK_URI and link.get("uri"):
+                if uri := external_web_uri(page, link):
                     # get_links() already returns rotated page coordinates.
                     box = fitz.Rect(link["from"])
                     box += (rect.x0, rect.y0, rect.x0, rect.y0)
-                    sheet.insert_link({"kind": fitz.LINK_URI, "from": box, "uri": link["uri"]})
+                    sheet.insert_link({"kind": fitz.LINK_URI, "from": box, "uri": uri})
+
+
+def restore_bilingual_source_links(dual, source, page_map, arrangement, control=None):
+    """Resolve original-panel jumps only after all selected destinations exist."""
+    import math
+    from urllib.parse import parse_qs, urlsplit
+    import pymupdf as fitz
+    destinations = {item['source']: item['start'] for item in page_map}
+    names = source.resolve_names()
+    offset = fitz.Point(0, 0 if arrangement == 'alternating' else 26)
+    restored = omitted = 0
+    for item in page_map:
+        if control:
+            control.checkpoint()
+        original = source[item['source']]
+        zooms = {}
+        current = original.first_link
+        while current is not None:
+            # PyMuPDF's dictionary reports zoom=0 even for explicit XYZ zooms;
+            # its resolved destination URI retains the actual percentage.
+            uri = current.uri or ''
+            value = parse_qs(urlsplit(uri).fragment).get('zoom', ['0'])[0].split(',')[0] if uri.startswith('#') else '0'
+            try:
+                zoom = float(value) / 100
+                if math.isfinite(zoom) and zoom >= 0:
+                    zooms[current.xref] = zoom
+            except ValueError:
+                pass
+            current = current.next
+        copies = 1 if arrangement == 'alternating' else item['count']
+        for index in range(copies):
+            page = dual[item['start'] + index]
+            panel = original.rect + (offset.x, offset.y, offset.x, offset.y)
+            # Single-page insert_pdf can preserve self-links but drops jumps
+            # elsewhere. Rebuild both together to avoid stale or duplicate IDs.
+            for existing in page.get_links():
+                if existing['kind'] in (fitz.LINK_GOTO, fitz.LINK_NAMED) and panel.contains(existing['from']):
+                    page.delete_link(existing)
+            for link in original.get_links():
+                if link['kind'] not in (fitz.LINK_GOTO, fitz.LINK_NAMED):
+                    continue
+                target = link.get('page', -1)
+                point = link.get('to')
+                zoom = zooms.get(link['xref'], link.get('zoom', 0))
+                viewport = None
+                if link['kind'] == fitz.LINK_NAMED:
+                    # Resolve in the source name tree, not the imported fragment.
+                    # Reading the PDF string avoids mojibake in get_links names.
+                    raw_type, name = source.xref_get_key(link['xref'], 'Dest')
+                    if raw_type not in ('string', 'name'):
+                        raw_type, name = source.xref_get_key(link['xref'], 'A/D')
+                    entry = names.get(name) if raw_type in ('string', 'name') else None
+                    if not entry or entry.get('page', -1) not in destinations:
+                        omitted += 1
+                        continue
+                    target = entry['page']
+                    transform = source[target].transformation_matrix * source[target].rotation_matrix
+                    if 'to' in entry:
+                        point = fitz.Point(entry['to']) * transform
+                        zoom = entry.get('zoom', 0)
+                    else:
+                        parts = entry.get('dest', '').split()
+                        try:
+                            values = [float(value) for value in parts[1:]]
+                        except ValueError:
+                            values = []
+                        if (parts[:1] != ['/FitR'] or len(values) != 4 or
+                                not all(math.isfinite(value) for value in values)):
+                            omitted += 1
+                            continue
+                        viewport = fitz.Rect(values) * transform
+                        point = viewport.tl
+                if target not in destinations or not isinstance(point, fitz.Point) or not all(
+                        math.isfinite(value) for value in (*point, *link['from'])):
+                    omitted += 1
+                    continue
+                box = fitz.Rect(link['from']) + (offset.x, offset.y, offset.x, offset.y)
+                if box.is_empty or not panel.contains(box):
+                    omitted += 1
+                    continue
+                destination = dual[destinations[target]]
+                page.insert_link(dict(kind=fitz.LINK_GOTO, page=destinations[target], zoom=zoom,
+                                      to=(point + offset) * destination.derotation_matrix,
+                                      **{'from': box * page.derotation_matrix}))
+                if viewport is not None:
+                    target_box = (viewport + (offset.x, offset.y, offset.x, offset.y)) * (
+                        destination.derotation_matrix * ~destination.transformation_matrix)
+                    values = ' '.join(f'{value:.8g}' for value in target_box)
+                    xref = page.annot_xrefs()[-1][0]
+                    dual.xref_set_key(xref, 'A/D', f'[{destination.xref} 0 R /FitR {values}]')
+                restored += 1
+    return dict(restored=restored, omitted=omitted)
 
 
 def check_layout_paragraph(paragraph, characters, page_number=None):
@@ -552,7 +650,7 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
     emit({"type": "measurement", "name": "原文布局保护索引", "seconds": active_clock(translator.control) - started})
     from linguafloat.document_artifacts import LayoutSnapshot
     snapshot = LayoutSnapshot(translator.store.path.parent, job, pages,
-                              policy_key="source-columns-v1-richtext-v4-quantity-v2-native-structure-v3-figure-protection-v2-context-v1-"+("scientific-v6" if policy.scientific.affected else "")+graphic_key+
+                              policy_key="source-columns-v1-richtext-v4-quantity-v4-native-structure-v3-figure-protection-v2-context-v1-"+("scientific-v7" if policy.scientific.affected else "")+graphic_key+
                               ("-bibliography-only-v4-"+hashlib.sha256(json.dumps(job.reference_boundary,sort_keys=True).encode()).hexdigest()
                                if job.skip_references else ""))
     settings = SettingsModel.model_validate({
@@ -639,8 +737,8 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
         return assemble_layout_pdf(job, all_pages, path, output, policy.continuation_indices,
                                    translator.control, policy.margin_references, policy.continuation_layout,
                                    policy.retained_regions,
-                                   lambda source,target: enhancer.apply(source,target,graphics=not defer_graphics), emit=emit,
-                                   body_checkpoint=body_checkpoint if job.workflow == "body" else None)
+                                   None if defer_graphics else enhancer.apply, emit=emit,
+                                   body_checkpoint=body_checkpoint if job.workflow == "body" and not defer_graphics else None)
     def body_checkpoint(body, page_map):
         from linguafloat.document_postprocess import save_body_artifact
         save_body_artifact(output, job, body, page_map, translator)
@@ -703,6 +801,8 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
             started = active_clock(translator.control)
             cached = snapshot.load(translation_config, emit)
             emit({"type": "measurement", "name": "读取译后中间数据", "seconds": active_clock(translator.control) - started})
+            # Caption regrouping needs original glyphs and belongs to source parsing.
+            # Do not discard accepted translations when replaying an older snapshot.
             if cached:
                 from babeldoc.format.pdf.document_il.midend.typesetting import Typesetting
                 restored = True
@@ -886,7 +986,23 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
     paths = []
     page_map = []
     with open_document(job.source) as source, fitz.open(rendered_path) as rendered, fitz.open() as mono, fitz.open() as dual:
+        bilingual_map = []
+
+        def append_dual(number, fragment):
+            start = len(dual)
+            append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+            bilingual_map.append(dict(source=number, start=start, count=len(dual) - start))
+
         publication = {}
+        masthead = None
+        if 0 in pages and not reference_page_only(job.reference_boundary if job.skip_references else {}, 0):
+            from linguafloat.document_masthead import repair_masthead
+            started = active_clock(control)
+            masthead = repair_masthead(source[0], rendered[0], control,
+                                       (getattr(job,'chinese_font',''), getattr(job,'latin_font','')))
+            if masthead and emit:
+                emit(dict(type='measurement', name='期刊刊头重排',
+                          seconds=active_clock(control) - started, **masthead))
         if job.target == 'zh-Hans' and getattr(job,'chinese_font','') and getattr(job,'latin_font',''):
             from linguafloat.document_publication import repair_dates, repair_author_identifiers
             for number in pages:
@@ -907,7 +1023,7 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                     page_map.append(dict(source=number, start=len(mono), count=len(fragment), selected=False))
                     mono.insert_pdf(fragment)
                     if job.bilingual:
-                        append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+                        append_dual(number, fragment)
                 measured("输出页面合成", page_started, number)
                 continue
             with fitz.open() as fragment:
@@ -944,7 +1060,8 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                         # Clear partially emitted glyphs before restoring the exact source.
                         fragment[0].add_redact_annot(rect, fill=(1,1,1), cross_out=False)
                         fragment[0].apply_redactions(images=0, graphics=0, text=0)
-                    fragment[0].show_pdf_page(rect, source, number, clip=rect)
+                    from linguafloat.document_clip import show_source_region
+                    show_source_region(fragment[0],rect,source,number)
                 measured("局部原文恢复", started, number)
                 if enhance:
                     enhance(source[number],fragment[0])
@@ -968,16 +1085,25 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                     from linguafloat.document_references import retain_pdf_tail
                     retain_pdf_tail(fragment[0], source[number], dict(boxes=reference_boxes(job.reference_boundary, number)))
                 measured("参考文献原文恢复", started, number)
+                from linguafloat.document_publisher_footer import restore_publisher_footer
+                restore_publisher_footer(source[number], fragment[0])
                 from linguafloat.document_failures import mark_pdf
                 progress(f"定位未翻译标记 · 第 {ordinal}/{len(pages)} 页", number)
                 started = active_clock(control)
                 mark_pdf(fragment[0], (retained_regions or {}).get(number, []), number, control=control)
                 measured("未翻译区域标记", started, number)
                 started = active_clock(control)
+                if number == 0 and masthead:
+                    from linguafloat.document_masthead import restore_masthead_actions
+                    restore_masthead_actions(fragment[0], masthead['links'])
+                from linguafloat.document_publisher_footer import restore_printed_urls
+                restore_printed_urls(source[number], fragment[0])
                 page_map.append(dict(source=number, start=len(mono), count=len(fragment), selected=True))
                 mono.insert_pdf(fragment)
+                if number == 0 and masthead:
+                    restore_masthead_actions(mono[page_map[-1]['start']], masthead['links'])
                 if job.bilingual:
-                    append_bilingual(dual, source, number, fragment, job.bilingual_layout)
+                    append_dual(number, fragment)
                 contacts=publication.get(number,{}).get('contacts',[])
                 if contacts:
                     from linguafloat.document_publication import draw_author_identifiers
@@ -990,6 +1116,13 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                         draw_author_identifiers(dual[first],contacts,fonts,offset=offset)
                 measured("单语与双语页面合成", started, number)
                 measured("输出页面合成", page_started, number)
+        if job.bilingual:
+            started = active_clock(control)
+            progress("恢复双语原文面板的跨页跳转")
+            links = restore_bilingual_source_links(dual, source, bilingual_map, job.bilingual_layout, control)
+            if emit:
+                emit(dict(type='measurement', name='双语原文跳转恢复',
+                          seconds=active_clock(control) - started, **links))
         if body_checkpoint:
             body_checkpoint(mono, page_map)
         for enabled, label, document in ((job.mono, "译文", mono), (job.bilingual, "双语", dual)):

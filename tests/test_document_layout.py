@@ -72,6 +72,18 @@ def test_line_spacing_and_expansion_preserve_original_font():
     assert not policy.continuations
 
 
+def test_short_heading_uses_available_column_width_before_new_lines():
+    from babeldoc.format.pdf.document_il import Box, PdfParagraph
+    engine, page, paragraph, units = engine_fixture(text='\u8d44\u52a9\u652f\u6301', box=Box(40, 300, 65, 312))
+    paragraph.layout_label = 'title'
+    page.pdf_paragraph.append(PdfParagraph(box=Box(40, 255, 240, 285), layout_label='plain text'))
+    policy = LayoutPolicy(JobControl())
+    policy.prepare_page(page)
+    scale, placed = policy.find(engine, paragraph, page, units, apply_layout=True)
+    assert scale == 1 and placed
+    assert len({round(c.box.y, 2) for p in paragraph.pdf_paragraph_composition for c in [p.pdf_character] if c}) == 1
+
+
 def test_preliminary_scale_search_does_not_repeat_final_layout(monkeypatch):
     engine, page, paragraph, units = engine_fixture(text="译" * 40)
     policy = LayoutPolicy(JobControl())

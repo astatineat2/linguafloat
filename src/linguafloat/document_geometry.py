@@ -234,6 +234,85 @@ def exclude_graphic_glyphs(page, areas):
     page.pdf_paragraph[:] = rebuilt
 
 
+def split_caption_groups(page, words):
+    """Locate caption rows with a source word crossing a detector boundary."""
+    labels = {'figure_caption', 'table_caption'}
+    marker = re.compile(r"^(?:Fig(?:ure)?\.?|Table|\u56fe|\u8868)\s*\d+", re.I)
+    captions, fallback = {}, []
+    for p in page.pdf_paragraph:
+        if not p.box or not p.pdf_style or not p.pdf_style.font_size:
+            continue
+        if p.layout_label in labels:
+            key = (p.layout_label, p.layout_id if p.layout_id is not None else id(p), p.xobj_id)
+            captions.setdefault(key, []).append(p)
+        elif p.layout_label == 'fallback_line':
+            fallback.append(p)
+
+    def boundary(left, right):
+        a, b = left.box, right.box
+        size = left.pdf_style.font_size
+        if (abs((a.y+a.y2-b.y-b.y2)/2) > size*.28 or
+                not -.35 <= b.x-a.x2 <= size*.8):
+            return False
+        return any(re.fullmatch(r'[A-Za-z]{2,}', word) and
+                   w[0]+.4 < min(a.x2,b.x) <= max(a.x2,b.x) < w[2]-.4 and
+                   w[1] <= (b.y+b.y2)/2 <= w[3] for word,w in words)
+
+    groups = []
+    for anchors in captions.values():
+        first = min(anchors, key=lambda p:(-p.box.y2,p.box.x))
+        size, linked, prefixes = first.pdf_style.font_size, [], []
+        for p in fallback:
+            if p.xobj_id != first.xobj_id or abs(p.pdf_style.font_size-size) > .35:
+                continue
+            is_prefix = (abs((p.box.y+p.box.y2-first.box.y-first.box.y2)/2) <= size*.28
+                         and -.35 <= first.box.x-p.box.x2 <= size*.8
+                         and marker.match(p.unicode or ''))
+            if is_prefix:
+                prefixes.append(p)
+            if any(boundary(p,a) or boundary(a,p) for a in anchors):
+                linked.append(p)
+        if linked and len(prefixes) <= 1 and (prefixes or marker.match(first.unicode or '')):
+            groups.append((first, [*anchors, *linked, *(p for p in prefixes if p not in linked)]))
+    owners = Counter(id(p) for _, group in groups for p in group)
+    return [(first, group) for first, group in groups if all(owners[id(p)] == 1 for p in group)]
+
+
+def repair_split_captions(page, words):
+    from babeldoc.format.pdf.document_il.utils.layout_helper import get_char_unicode_string
+    from linguafloat.document_scientific import composition_chars
+
+    changes = []
+    for carrier, group in split_caption_groups(page, words):
+        if any(part.pdf_same_style_unicode_characters
+               for p in group for part in p.pdf_paragraph_composition):
+            continue  # Translated fragments cannot be recombined losslessly.
+        size = carrier.pdf_style.font_size
+        rows = []
+        for p in sorted(group, key=lambda p:(-(p.box.y+p.box.y2)/2,p.box.x)):
+            y = (p.box.y+p.box.y2)/2
+            if not rows or abs(rows[-1][0]-y) > size*.28:
+                rows.append((y, []))
+            rows[-1][1].append(p)
+        ordered = [p for _, row in rows for p in sorted(row,key=lambda p:p.box.x)]
+        parts = [part for p in ordered for part in p.pdf_paragraph_composition]
+        chars = [c for part in parts for c in composition_chars(part)]
+        if not chars or len(chars) != len({id(c) for c in chars}):
+            continue
+        text = ' '.join(get_char_unicode_string(
+            [c for p in sorted(row,key=lambda p:p.box.x) for part in p.pdf_paragraph_composition
+             for c in composition_chars(part)]).strip() for _,row in rows)
+        carrier.box = union([p.box for p in group])
+        carrier.pdf_paragraph_composition = parts
+        carrier.unicode = text
+        joined = {id(p) for p in group}
+        at = min(i for i,p in enumerate(page.pdf_paragraph) if id(p) in joined)
+        page.pdf_paragraph[:] = [p for p in page.pdf_paragraph if id(p) not in joined]
+        page.pdf_paragraph.insert(at, carrier)
+        changes.append(dict(kind='joined_split_caption', count=len(group)))
+    return changes
+
+
 def join_fragmented_paragraphs(page, words=(), source_characters=()):
     """Join a wide body block with fragments of the same detected source line.
 

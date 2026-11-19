@@ -15,6 +15,25 @@ def has_prose(text):
     return bool(re.search(r"[A-Za-z]{3,}|[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]{2,}", text))
 
 
+def outline_row_matches_source(line, source_lines):
+    """Corroborate cropped OCR against the original, uncropped OCR row."""
+    import pymupdf as fitz
+    text = ' '.join(line['text'].split())
+    box = fitz.Rect(line['box'])
+    if not text or box.is_empty or not line.get('horizontal') or line.get('confidence', 0) < .97:
+        return False
+    for source in source_lines:
+        if (not source.get('horizontal') or source.get('confidence', 0) < .97 or
+                ' '.join(source['text'].split()) != text):
+            continue
+        row = fitz.Rect(source['box'])
+        common = box & row
+        if (abs(box.y0 + box.y1 - row.y0 - row.y1) / 2 <= min(box.height, row.height) * .3
+                and common.width >= max(box.width, row.width) * .75):
+            return True
+    return False
+
+
 def native_prose_seeds(page, regions):
     """Hidden text locates missed rows; only subsequent visible OCR supplies text."""
     import pymupdf as fitz
@@ -278,9 +297,12 @@ class Recovery:
                 reason = "" if good else "公式、符号或数字保持原位"
                 if good and not hidden_agrees and min(w["confidence"] for w in group) < .9:
                     reason = "局部高分辨率 OCR 仍有低置信度文字"
-                candidate = dict(box=tight, text=text, lines=[dict(line, box=tight, text=text)],
+                observation = dict(line, box=tight, text=text)
+                if original.get('outline_prose') and not mixed:
+                    observation['outline_whole_row'] = outline_row_matches_source(line, original.get('lines', []))
+                candidate = dict(box=tight, text=text, lines=[observation],
                                  reason=reason, label="recovered", recovered=True, preserved=not good,
-                                 full_line=not mixed)
+                                 full_line=not mixed, outline_prose=original.get('outline_prose', False))
                 if match[0] >= .85:
                     candidate["verified_row"] = tuple(round(v, 2) for v in match[1])
                 if mixed and good:
@@ -331,13 +353,13 @@ def recover_regions(page, regions, analyzer, digest):
                 region = dict(region, reason=reason)
         pending.append(region)
     pending.extend(native_prose_seeds(page, pending))
-    if not any(r.get("reason") and has_prose(r["text"]) for r in pending):
+    if not any(r.get("reason") and not (r.get('preserved') or r.get('atomic')) and has_prose(r["text"]) for r in pending):
         return pending
     recovery = Recovery(page, analyzer, digest)
     result = []
     for i, region in enumerate(pending):
         analyzer.translator.control.checkpoint()
-        if region.get("reason") and not region.get("preserved"):
+        if region.get("reason") and not (region.get("preserved") or region.get('atomic')):
             analyzer.emit({"type": "progress", "stage": "OCR 中", "value": None,
                            "message": f"局部补识别：第 {page.number + 1} 页，区域 {i + 1}/{len(pending)}"})
             result.extend(recovery.region(region))

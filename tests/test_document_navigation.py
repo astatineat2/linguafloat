@@ -222,3 +222,13 @@ def test_commit_error_is_fatal_in_adapter(monkeypatch):
             control=SimpleNamespace(checkpoint=lambda: None), translate_fragment=lambda *a, **kw: '中文导航')
         with pytest.raises(NavigationCommitError):
             repair_navigation(source[0], output[0], translator)
+
+
+def test_shifted_label_requires_the_same_order_and_typography():
+    from linguafloat.document_navigation import _same_shifted_label
+    with fitz.open() as source, fitz.open() as rendered:
+        box=fitz.Rect(10,10,155,45)
+        page=source.new_page(); page.insert_text((20,30),'First Label',fontsize=9)
+        for text,size,allowed in [('First Label',9,True),('Label First',9,False),('First Label',8,False)]:
+            target=rendered.new_page(); target.insert_text((25,30),text,fontsize=size)
+            assert _same_shifted_label(page,target,box) == allowed

@@ -198,8 +198,17 @@ class SourceContext:
         return result
 
 
+def normalize_numeric_ranges(text):
+    """Separate a contiguous prose range from the sign of its second value."""
+    number = r'[-+\u2212]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+\u2212]?\d+)?'
+    pattern = (r'(?<![A-Za-z0-9_./-])(' + number + r')[\u2010\u2011\u2013\u2014-]'
+               r'(?=' + number + r'(?![A-Za-z0-9_/]|\.\d))')
+    return re.sub(pattern, lambda m: m[1] + '\u2013', text)
+
+
 def scientific_quantities(text):
     """Conservative guard for decimal, exponent and percent values, not all prose digits."""
+    text = normalize_numeric_ranges(text)
     values = []
     # Unicode \w includes Han: a translated value need not have an ASCII
     # space before it. Keep identifier/decimal boundaries and the sign intact.

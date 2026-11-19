@@ -7,13 +7,15 @@ import json
 import re
 from pathlib import Path
 
-SCHEMA = "graphics-v12-independent-table-cells"
-AREA_SCHEMA = "graphic-areas-v3-figure-ownership"
-# Body snapshots contain original figures, not translated labels. Updating
-# label validation must not discard compatible, already translated prose.
-PROTECTION_SCHEMA = "graphics-v9-figure-ownership"
+SCHEMA = "graphics-v21-caption-edges"
+AREA_SCHEMA = "graphic-areas-v5-caption-edges"
+# Area ownership changed: old body snapshots may already contain table prose.
+PROTECTION_SCHEMA = "graphics-v11-native-caption-edges"
 
 CONNECTIVES = frozenset("of in to at on by for and the a an or with without from".split())
+CHEMICAL_LOCANT = re.compile(
+    r'(?:[NDLdlnosOARS]-|[A-Za-z]{5,}-)*(?:[1-9]\d?(?:,[1-9]\d?)*-)+(?:[a-z]{5,}(?:-[a-z]{4,})*)')
+CHEMICAL_STEM = re.compile(r'(?<=-)(?:amino|hydroxy|carboxy|oxo|methyl|ethyl|acetyl|phospho|chloro|bromo)[a-z]{2,}')
 
 
 def label_text(text):
@@ -32,6 +34,8 @@ def source_digest(path):
 
 def natural_word(text):
     text = label_text(text).strip(".,:;()[]")
+    if re.fullmatch(r"[A-Za-z][A-Za-z'-]{2,}(?:/[A-Za-z][A-Za-z'-]{2,})+", text):
+        return all(natural_word(part) for part in text.split('/'))
     if re.search(r"\d|[=∑∫√±×÷_^]",text):
         return False
     if text in {"mm","cm","nm","GHz","MHz","kHz","Hz","mT","nT","mA","kPa","MPa","GHz","mV","mol"}:
@@ -44,6 +48,59 @@ def natural_word(text):
         return False
     return bool(text.lower() in {"up", "no"} or re.fullmatch(r"[A-Za-z][A-Za-z'-]{2,}",text)
                 or re.search(r"[\u3400-\u9fff]{2,}",text))
+
+
+def has_chemical_locant(text):
+    return bool(CHEMICAL_LOCANT.fullmatch(text.strip('.,:;()[]')) and CHEMICAL_STEM.search(text))
+
+
+def coded_legend_labels(lines):
+    """Only accept repeated, unambiguous single-letter categories with complete prose."""
+    entries={}
+    for line in lines:
+        text=line.get('text',''); m=re.fullmatch(r'([A-Z]):\s*([A-Z][A-Za-z]+(?:[ ,:/-]+[A-Za-z]+)*)',text)
+        if m and not line.get('rotation') and line.get('confidence',0)>=.97:
+            entries.setdefault(m[1],[]).append((text,m[2]))
+    return dict(v[0] for v in entries.values() if len(v)==1) if len(entries)>=3 else {}
+
+
+def corroborated_legend(page, region, analyzer):
+    """When erasure is unsafe, independently reread a complete upright label.
+
+    No diagram ink is removed. A matching substring or adjoining bar value
+    is not evidence for a complete legend entry.
+    """
+    import pymupdf as f
+    text=region.get('source_line','')
+    if (region.get('kind')!='figure' or region.get('source')!='ocr' or region.get('rotation')
+            or not hasattr(analyzer,'ocr') or len(text)>110 or len(text.split())<2
+            or not re.fullmatch(r'[A-Za-z][A-Za-z ,:/-]*[A-Za-z]',text)
+            or not region.get('legend_only') and text!=region.get('text')):
+        return False
+    from linguafloat.document_core import Cancelled
+    try:
+        rows=analyzer.ocr.recognize(page,positioned=True,clip=(f.Rect(region['box'])+(-1,-1,1,1))&page.rect,scale=8)
+    except Cancelled:
+        raise
+    except (RuntimeError,ValueError,OSError):
+        return False
+    return (len(rows)==1 and rows[0].get('confidence',0)>=.97 and rows[0].get('horizontal')
+            and ' '.join(rows[0]['text'].split())==' '.join(text.split()))
+
+
+def category_description(line,groups):
+    """Do not label a figure legend with a translation of just its head or tail.
+
+    Preserve trailing OCR marks/plot numbers on the image; only the English
+    descriptor goes to translation, never a speculative interpretation of them.
+    """
+    text=line['text']
+    if line.get('rotation') or line.get('confidence',0)<.97:return None
+    match=re.fullmatch(r'([A-Za-z]{3,}(?: [A-Za-z]+)*(?:: | - )[a-z]{3,}(?: [a-z]+)*)(?:-\d{0,2})?',text)
+    if not match:return None
+    lexical=lambda s:re.findall(r'[A-Za-z]+',s)
+    if any(lexical(' '.join(w['text'] for w in g))==lexical(match[1]) for g in groups):return None
+    return match[1]
 
 
 def visible_native_words(page, rect):
@@ -95,6 +152,7 @@ def native_graphic_lines(page, rect):
                    and (f.Rect(s['bbox']) & box).get_area() > 0]
         lines.append(dict(text=' '.join(w['text'] for w in words), box=list(box),
                           words=words, confidence=1, source='native', direction=list(direction),
+                          native_block=key[0], native_line=key[1],
                           baseline=median(origins) if origins else None,
                           font_size=median(w['size'] for w in words),
                           horizontal=abs(direction[1]) < .1,
@@ -139,7 +197,7 @@ def join_horizontal_labels(lines, protected=(), *, indent=.3):
     result = [dict(line) for line in lines]
     def eligible(line):
         return line.get('horizontal', f.Rect(line['box']).width >= f.Rect(line['box']).height) and all(
-            w['text'] not in protected and (natural_word(w['text']) or w['text'].lower() in CONNECTIVES)
+            translation_word(w, protected)
             for w in line.get('words', []))
     def follows(a, b):
         if not eligible(a) or not eligible(b) or not b['text'][:1].islower():
@@ -201,6 +259,7 @@ def cell_graphic_lines(lines, cells, protected=()):
     the same cell can merge; formula words remain obstacles and split runs.
     """
     import pymupdf as f
+    prose = native_prose_cells(lines, cells)
     buckets = {}
     for line in lines:
         parts = {}
@@ -210,10 +269,13 @@ def cell_graphic_lines(lines, cells, protected=()):
                           f.Rect(c['box']).contains((b.tl+b.br)/2)), None)
             parts.setdefault(index, []).append(word)
         for index, words in parts.items():
+            if index in prose:
+                buckets.setdefault(index, []).append(dict(line, words=[dict(w,
+                    table_prose=True, baseline=line.get('baseline')) for w in words]))
+                continue
             groups = []
             for word in words:
-                natural = word['text'] not in protected and (natural_word(word['text'])
-                    or word['text'].lower() in CONNECTIVES)
+                natural = translation_word(word, protected)
                 if not groups or (index is not None and natural != groups[-1][0]):
                     groups.append((natural, [word]))
                 else:
@@ -226,16 +288,83 @@ def cell_graphic_lines(lines, cells, protected=()):
                     text=' '.join(w['text'] for w in run)))
     result = []
     for index, members in buckets.items():
+        # A font-run change can split one chemical name mid-line. The native
+        # cell boundary, common baseline and inter-word gaps must all agree.
+        if (index is not None and cells[index].get('native_reliable') and len(members) > 1
+                and all(m.get('source') == 'native' and m.get('horizontal') and
+                        m.get('baseline') is not None for m in members)):
+            words = sorted((w for m in members for w in m['words']), key=lambda w: w['box'][0])
+            size = min(w.get('size', 0) for w in words)
+            if (size > 0 and max(m['baseline'] for m in members)-min(m['baseline'] for m in members) < .15*size
+                    and any(has_chemical_locant(w['text']) for w in words)
+                    and all(translation_word(w, protected) for w in words)
+                    and all(-.05*size <= b['box'][0]-a['box'][2] <= .8*size for a,b in zip(words,words[1:]))):
+                box = f.Rect(words[0]['box'])
+                for w in words[1:]:
+                    box |= f.Rect(w['box'])
+                result.append(dict(members[0], text=' '.join(w['text'] for w in words),
+                                   box=list(box), words=words))
+                continue
+        if index in prose:
+            members.sort(key=lambda l:(l.get('baseline') or l['box'][1], l['box'][0]))
+            words = [w for l in members for w in sorted(l['words'], key=lambda w:w['box'][0])]
+            box = f.Rect(words[0]['box'])
+            for word in words[1:]:
+                box |= f.Rect(word['box'])
+            joined = dict(members[0], box=list(box), words=words,
+                text=' '.join(w['text'] for w in words), prose_cell=True, cell_box=cells[index]['box'])
+            mark_table_references([joined])
+            result.append(joined)
+            continue
         # Outside the grid keep the old figure path's conservative joining.
         result.extend(join_horizontal_labels(join_vertical_labels(members), protected,
                                              indent=.3 if index is None else 1.0))
     return result
 
 
-def scientific_tokens(page):
+def native_prose_cells(lines, cells):
+    """Only complete native multiline prose qualifies for cell-wide reflow."""
+    import pymupdf as f
+    result = set()
+    for index, cell in enumerate(cells):
+        if cell.get('row', 1) == 1 or not cell.get('native_reliable'):
+            continue
+        bounds = f.Rect(cell['box'])
+        members = [(line, w) for line in lines for w in line.get('words', [])
+                   if bounds.contains((f.Rect(w['box']).tl+f.Rect(w['box']).br)/2)]
+        if (len(members) < 8 or any(l.get('source') != 'native' or l.get('rotation') for l, w in members)
+                or len({round(l.get('baseline') or w['box'][1], 1) for l, w in members}) < 2):
+            continue
+        result.add(index)
+        cell['prose_cell'] = True
+        # Abbreviated biological names have explicit italic source evidence.
+        ordered = sorted(members, key=lambda pair:(pair[0].get('baseline') or pair[1]['box'][1], pair[1]['box'][0]))
+        for (_, first), (_, second) in zip(ordered, ordered[1:]):
+            if (first.get('italic') and second.get('italic')
+                    and re.fullmatch(r'[A-Z]\.', first['text'])
+                    and re.fullmatch(r'[a-z]{3,}[,;.]?', second['text'])):
+                first['source_scientific'] = second['source_scientific'] = True
+    return result
+
+
+def table_prose_text(words):
+    """Remove only a source discretionary hyphen at a measured line wrap."""
+    text = words[0]['text']
+    for previous, word in zip(words, words[1:]):
+        if (previous['text'].endswith(('\u00ad', '-')) and word['text'][:1].islower()
+                and word['box'][1] > previous['box'][1]+1):
+            text = text.removesuffix('\u00ad')+word['text']
+        else:
+            text += ' '+word['text']
+    return text
+
+
+def scientific_tokens(page, context=None):
     """Evidence from *source* typography/definitions, never a guessed formula."""
     text = page.get_text()
     tokens=set(re.findall(r'\(([A-Z]{2,6})\)',text))
+    if context is not None:
+        tokens.update(context.definitions)
     # Corroborate OCR species fragments using source text. A capitalized
     # English pair (e.g. Crystal structure) is NOT a biological-name detector.
     names = list(re.finditer(r'\b[A-Z]\.\s+([a-z]{3,})\b', text))
@@ -257,6 +386,78 @@ def scientific_tokens(page):
     return tokens
 
 
+def translation_word(word, protected):
+    text = word['text']
+    prose = word.get('table_prose')
+    return (not word.get('source_reference') and not word.get('source_scientific')
+            and text.strip('.,:;()[]') not in protected
+            and (natural_word(text.replace('\u00ad', '-') if prose else text)
+                 or word.get('native_table_word') and has_chemical_locant(text)
+                 or text.strip().lower() in CONNECTIVES
+                 or prose and text.lower().strip('.,:;()[]') in {'is', 'as', 'be', 'it', 'do', 'we', 'are', 'was', 'were'}))
+
+
+def mark_table_references(lines):
+    """Mark literal author/year citation runs, never surnames by themselves."""
+    import pymupdf as f
+    # Include wrapped dates only from the next aligned physical line. A PDF
+    # block may hold several columns or rows, so block membership is insufficient.
+    name = r"[A-Z][A-Za-z'\u2019-]+"
+    citation = re.compile(r'\b' + name + r'(?:\s+(?:&|and)\s+' + name + r')?'
+                          r'\s+et\s+al\.?\s*\(\s*(?:19|20)\d{2}[a-z]?\s*\)')
+    for line in lines:
+        words = list(line['words'])
+        box = f.Rect(line['box'])
+        following = [other for other in lines if other is not line
+                     and 0 < other['box'][1]-box.y0 <= box.height*1.5
+                     and abs(other['box'][0]-box.x0) < box.height
+                     and re.match(r'^\(?\s*(?:19|20)\d{2}', other['text'])]
+        if following:
+            words += min(following, key=lambda other: other['box'][1])['words']
+        text = ' '.join(w['text'] for w in words)
+        spans, offset = [], 0
+        for word in words:
+            spans.append((offset, offset+len(word['text']), word))
+            offset += len(word['text'])+1
+        for match in citation.finditer(text):
+            for start, end, word in spans:
+                if start < match.end() and end > match.start():
+                    word['source_reference'] = True
+
+
+_UNIT_ALIASES = {'毫克':'mg', '微克':'μg', '千克':'kg', '克':'g', '毫升':'mL',
+                 '微米':'μm', '微摩尔':'μmol', 'ml':'mL', 'μl':'μL',
+                 '微升':'μL', '升':'L', '毫米':'mm', '厘米':'cm', '米':'m', '秒':'s',
+                 '分钟':'min', '小时':'h', '摄氏度':'°C', '毫摩尔':'mmol', '摩尔':'mol'}
+_UNIT = '(?:' + '|'.join(sorted(set(_UNIT_ALIASES) | set(_UNIT_ALIASES.values()) |
+    {'ng','nm','μm','μmol','μM','mM','nM','mV','V','kPa','Pa','Hz','kHz','nmol','ms'},
+    key=len, reverse=True)) + ')(?![A-Za-z])'
+_MEASURE = re.compile(r'(?P<number>\d+(?:\.\d+)?|\.\d+)\s*(?P<unit>%|' + _UNIT +
+                      r'(?:\s*/\s*' + _UNIT + r')?)?')
+_GROUP = re.compile(r'(?<![a-z])(control|treatment)(?:\s+group)?\s*[:=]?\s*$|'
+                    r'(对照|处理|治疗)(?:组)?\s*[:：=]?\s*$', re.I)
+
+
+def _measurement_signature(text):
+    from collections import Counter
+    from linguafloat.document_context import normalize_numeric_ranges
+    text = normalize_numeric_ranges(text.translate(str.maketrans('−％＜＞＝µ', '-%<>=μ')))
+    text = text.replace('<=','≤').replace('>=','≥').replace('!=','≠')
+    entries, groups = [], []
+    for m in _MEASURE.finditer(text):
+        before = text[:m.start()].rstrip()
+        op = re.search(r'([<>≤≥≠=±])\s*([+-]?)$|(?<![A-Za-z0-9])([+-])$|(?<=\d[eE])([+-])$', before)
+        prefix = ''.join(op.groups(default='')) if op else ''
+        unit = '/'.join(_UNIT_ALIASES.get(u.strip(),u.strip()) for u in (m['unit'] or '').split('/'))
+        value = (prefix, m['number'], unit)
+        entries.append(value)
+        group = _GROUP.search(before[:op.start()] if op else before)
+        if group:
+            name = (group[1] or group[2]).lower()
+            groups.append(('control' if name in ('control','对照') else 'treatment',value))
+    return entries, Counter(groups)
+
+
 def validate_graphic_fragment(source, translation):
     """Reject measurable context expansion before storing a successful reply.
 
@@ -266,9 +467,25 @@ def validate_graphic_fragment(source, translation):
     """
     from collections import Counter
     from linguafloat.document_core import DocumentError
-    signature = lambda text: Counter(re.findall(r'\d+(?:\.\d+)?|[\u0370-\u03ff]', text))
+    def signature(text):
+        # A micro prefix inside a measured unit is compared with the unit;
+        # a free-standing Greek variable must still match independently.
+        text = _MEASURE.sub(lambda m: m[0].replace('μ',''), text.replace('µ','μ'))
+        return Counter(re.findall(r'\d+(?:\.\d+)?|[\u0370-\u03ff]', text))
     if signature(source) != signature(translation):
         raise DocumentError('[图表片段校验失败] 数值或科学符号与目标片段不一致；可能混入上下文，已保留原文。')
+    measures, groups = _measurement_signature(source)
+    converted, target_groups = _measurement_signature(translation)
+    if (Counter(measures) != Counter(converted)
+            or (groups and target_groups and groups != target_groups)
+            or (groups and not target_groups and measures != converted)):
+        raise DocumentError('[图表片段校验失败] 数值的符号、单位、比较方向或实验组对应发生变化；已保留原文。')
+    locants = [m for word in source.split() if has_chemical_locant(word)
+               for m in re.findall(r'(?:[NDLdlnosOARS]-)*(?:[1-9]\d?(?:,[1-9]\d?)*-)+', word)]
+    for locant, count in Counter(locants).items():
+        exact = r'(?<![A-Za-z0-9,])' + re.escape(locant)
+        if len(re.findall(exact, translation)) != count:
+            raise DocumentError('[图表片段校验失败] 化合物名称的定位符或构型发生变化，已保留原文。')
     identifiers = Counter(re.findall(r'(?<=[a-z]-)[A-Z]{2,}(?=[-\s]|$)', source))
     if any(len(re.findall(r'(?<![A-Za-z0-9])'+re.escape(token)+r'(?![A-Za-z0-9])', translation)) != count
            for token, count in identifiers.items()):
@@ -281,7 +498,7 @@ def classify_content(page,area,region,analyzer):
     import pymupdf as f
     text=region['text'].strip()
     b=f.Rect(region['box'])
-    if text.strip('()') in scientific_tokens(page):
+    if text.strip('.,:;()[]') in scientific_tokens(page, getattr(analyzer, 'source_context', None)):
         return 'protected','原页正文/图注明确定义的缩写或带上下标变量；保留原始字形。'
     # Raster diagrams also define identifiers beneath a full natural name.
     # Keep the parenthesized token as artwork, without an acronym blacklist
@@ -413,7 +630,7 @@ def graphic_translation_context(source, area, region, translator):
     caption = min(captions, key=lambda item:item[0])[1] if captions else ""
     memory = getattr(translator, "graphic_context", None)
     packet = memory.packet(source.number, region["text"], caption) if memory else {"caption_source":caption[:500]}
-    protected = scientific_tokens(source)
+    protected = scientific_tokens(source, getattr(translator, 'source_context', None))
     packet["protected_source_tokens"] = list(dict.fromkeys(w["text"][:80] for line in area.get("lines", [])
         for w in line.get("words", []) if not natural_word(w["text"]) or w["text"] in protected))[:24]
     packet['source_label'] = region.get('source_line', region['text'])
@@ -432,6 +649,8 @@ class GraphicAnalyzer:
         self.ocr = DocumentOcr()
         self.ocr.emit = emit
         self.model = None
+        self.source_context = None
+        self._source_context_digest = None
 
     def discover_areas(self, page, digest):
         """Detect complete figures/tables without OCR or translation.
@@ -472,8 +691,10 @@ class GraphicAnalyzer:
             if box.is_empty:
                 continue
             nearby = [(kind, caption) for kind, caption in captions
-                      if -1 <= caption.y0-box.y1 <= 32
-                      and min(caption.x1,box.x1)-max(caption.x0,box.x0) > box.width*.6]
+                      if (min(caption.x1,box.x1)-max(caption.x0,box.x0) > box.width*.6
+                          and -1 <= caption.y0-box.y1 <= 32) or
+                         (kind=='figure' and abs(caption.x0-box.x0)<=8 and caption.width>box.width*.18
+                          and -caption.height*.8<=caption.y0-box.y1<=12)]
             nearby.sort(key=lambda entry:abs(entry[1].y0-box.y1))
             evidence = 'layout-model'
             if nearby:
@@ -511,6 +732,13 @@ class GraphicAnalyzer:
                 else:
                     continue
             areas.append(candidate)
+        from linguafloat.document_graphic_layout import native_table_regions
+        for candidate in native_table_regions(page):
+            box = fitz.Rect(candidate['box'])
+            if any((box & fitz.Rect(area['box'])).get_area() >
+                   min(box.get_area(), fitz.Rect(area['box']).get_area())*.5 for area in areas):
+                continue
+            areas.append(candidate)
         areas.sort(key=lambda a:(a["box"][1],a["box"][0]))
         for index, area in enumerate(areas):
             area['id'] = f"p{page.number+1}-{index+1}"
@@ -529,7 +757,7 @@ class GraphicAnalyzer:
         return [dict(area) for area in self.discover_areas(page, digest)
                 if area['kind'] == 'figure' or translate_tables]
 
-    def discover(self, page, digest, *, kinds=None):
+    def discover(self, page, digest, *, kinds=None, excluded_figures=()):
         """Extract labels after area discovery; native text precedes OCR fallback.
 
         `kinds` may be {'figure'}, {'table'} or empty to avoid OCR for disabled
@@ -537,15 +765,24 @@ class GraphicAnalyzer:
         """
         import pymupdf as fitz
         wanted = frozenset({'figure', 'table'} if kinds is None else kinds)
+        if self._source_context_digest != digest:
+            from linguafloat.document_context import SourceContext, SourceBlock
+            self.source_context = SourceContext(SourceBlock(p.get_text(), 'page') for p in page.parent)
+            self._source_context_digest = digest
         key = f"{SCHEMA}:{digest}:{page.number}:{','.join(sorted(wanted))}"
+        if excluded_figures:
+            key += ':exclude:' + json.dumps(sorted(excluded_figures))
         cached = self.store.get(key) if self.store else None
         if cached:
             return json.loads(cached)
         areas = [a for a in self.discover_areas(page,digest) if a['kind'] in wanted]
-        protected = scientific_tokens(page)
+        protected = scientific_tokens(page, self.source_context)
         result = []
         for index,area in enumerate(areas):
             self.control.checkpoint()
+            if area['kind'] == 'figure' and area['id'] in excluded_figures:
+                result.append(dict(area, regions=[], skip_reason='用户指定整图保留，不识别或翻译图内标签。'))
+                continue
             rect = fitz.Rect(area["box"])
             native = native_graphic_lines(page, rect)
             from linguafloat.document_graphic_layout import native_grid_cells
@@ -572,33 +809,51 @@ class GraphicAnalyzer:
                                              text=' '.join(w['text'] for w in words)))
                 ocr = fallback
             lines = prefer_native_lines(native, ocr)
+            if area['kind'] == 'table':
+                mark_table_references(lines)
+                for line in lines:
+                    for word in line.get('words', []):
+                        if word.get('source') == 'native':
+                            word['native_table_word'] = True
             if cells:
                 lines = cell_graphic_lines(lines, cells, protected)
             elif area["kind"] == "figure":
                 lines = join_vertical_labels(lines)
                 lines = join_horizontal_labels(lines, protected)
+            else:
+                lines = join_horizontal_labels(lines, protected)
             regions = []
+            coded = coded_legend_labels(lines) if area['kind']=='figure' else {}
             for line in lines:
                 words = line.get("words") or [dict(text=line["text"],box=line["box"],confidence=line["confidence"])]
                 # Exclude number/unit/symbol runs, including axis suffixes such as H (A/m).
                 groups,group = [],[]
                 for word in words:
-                    accepted = word['text'] not in protected and (natural_word(word["text"]) or word["text"].strip().lower() in CONNECTIVES)
+                    accepted = translation_word(word, protected)
                     if accepted:
                         if group:
                             previous,current = fitz.Rect(group[-1]["box"]),fitz.Rect(word["box"])
-                            if current.x0-previous.x1 > max(previous.height,current.height)*2:
+                            if not line.get('prose_cell') and current.x0-previous.x1 > max(previous.height,current.height)*2:
                                 groups.append(group); group=[]
                         group.append(word)
                     elif group:
                         groups.append(group); group=[]
                 if group: groups.append(group)
+                if area['kind']=='figure' and line['text'] not in coded:
+                    complete=category_description(line,groups)
+                    if complete:coded[line['text']]=complete
+                if line['text'] in coded:
+                    groups=[words]
                 for group in groups:
-                    if not any(natural_word(w["text"]) for w in group) and not any(w['text'] in protected for w in words):
+                    if (line['text'] not in coded and not any(natural_word(w['text']) or w.get('native_table_word') and
+                                has_chemical_locant(w['text']) for w in group)
+                            and not any(w['text'] in protected for w in words)):
                         continue
                     box = fitz.Rect(group[0]["box"])
                     for word in group[1:]: box |= fitz.Rect(word["box"])
-                    text = " ".join(w["text"] for w in group)
+                    text = table_prose_text(group) if line.get('prose_cell') else " ".join(w["text"] for w in group)
+                    if line['text'] in coded:
+                        text=coded[line['text']]
                     confidence = min(line["confidence"],min(w.get("confidence",1) for w in group))
                     identity = hashlib.sha256(json.dumps([digest,page.number,area["kind"],[round(v,1) for v in box],text]).encode()).hexdigest()[:20]
                     rotation = line.get('rotation', 90 if box.height>box.width*1.8 and not line.get('horizontal') else 0)
@@ -609,6 +864,11 @@ class GraphicAnalyzer:
                                         native_bold=all(w.get('bold', False) for w in group),
                                         native_italic=all(w.get('italic', False) for w in group),
                                         reason=line.get('reason') or ("OCR 置信度不足，请校对原文" if confidence<.95 else "")))
+                    if line['text'] in coded:
+                        regions[-1]['legend_only']=True
+                    if line.get('prose_cell'):
+                        regions[-1].update(prose_cell=True, cell_box=line['cell_box'],
+                            source_text=' '.join(w['text'] for w in group))
             # Keep geometry for *all* words, including protected values and units.
             # They are layout obstacles / exact source fragments, never API input.
             area["lines"] = lines
@@ -627,22 +887,36 @@ def native_erase_boxes(page, region):
     """
     import pymupdf as f
     boxes = [f.Rect(b) for b in region.get('source_boxes', [region['box']])]
+    envelope = f.Rect(boxes[0]) if boxes else f.Rect()
+    for box in boxes[1:]:
+        envelope |= box
+    envelope += (-.02,-.02,.02,.02)
     chars = [(c['c'], f.Rect(c['bbox'])) for block in page.get_text('rawdict', flags=f.TEXTFLAGS_WORDS)['blocks']
-             for line in block.get('lines', []) for span in line['spans']
-             for c in span['chars'] if not c['c'].isspace()]
+             for line in block.get('lines', []) if envelope.intersects(line['bbox']) for span in line['spans']
+             for c in span['chars'] if not c['c'].isspace() and
+             (envelope.intersects(c['bbox']) or envelope.contains(c['bbox']))]
     selected = []
     for box in boxes:
-        selected.extend((text, b) for text, b in chars if (box+(-.01,-.01,.01,.01)).contains(b))
+        padded = box+(-.01,-.01,.01,.01)
+        selected.extend((text, b) for text, b in chars if padded.contains(b))
     if not selected:
         return None
-    expected = region.get('text')
+    expected = region.get('source_text', region.get('text'))
     if expected and not region.get('suffix_box'):
         compact = lambda s: ''.join(label_text(s).split())
         if compact(''.join(text for text, _ in selected)) != compact(expected):
             return None  # Ambiguous overlapping native runs; don't guess ownership.
-    protected = [b for text, b in chars if (text, b) not in selected]
+    owned = {(text, tuple(b)) for text, b in selected}
+    protected = [b for text, b in chars if (text, tuple(b)) not in owned]
     result = []
     for _, char in selected:
+        # Multi-codepoint ToUnicode ligatures have zero-advance continuation
+        # characters. They count toward the text check but share a PDF glyph.
+        if char.width == 0:
+            if expected and not any(b.width > 0 and abs(b.x1-char.x0)<.01 and
+                       abs(b.y0-char.y0)<.01 and abs(b.y1-char.y1)<.01 for _, b in selected):
+                return None
+            continue
         pieces = [char]
         for obstacle in protected:
             if not char.intersects(obstacle):
@@ -685,12 +959,9 @@ def glyph_patch(page, region):
         # PDF redaction removes these text operators, without painting over the
         # original background, rules or vector artwork. A pixel eraser cannot
         # safely infer a background across p.3's alternating shaded bands.
-        # Keep the patch contract with a transparent no-op image; collision
-        # checking still runs on the redacted source before any placement.
-        color, alpha = io.BytesIO(), io.BytesIO()
-        Image.new('RGB', (1, 1), (255, 255, 255)).save(color, format='PNG')
-        Image.new('L', (1, 1), 0).save(alpha, format='PNG')
-        return (color.getvalue(), list(box), alpha.getvalue(), list(box)), ''
+        # No raster patch: adding even a transparent soft mask changes the
+        # renderer's blending of untouched glyphs elsewhere on the page.
+        return (None, list(box), None, list(box)), ''
     clip = (box+(-3,-3,3,3)) & page.rect
     scale=4
     pix=page.get_pixmap(matrix=fitz.Matrix(scale,scale),clip=clip,colorspace=fitz.csRGB,alpha=False)
@@ -787,6 +1058,34 @@ def graphic_overlay(page, region, text, target, control):
     return None
 
 
+def fit_sizes(preferred, floor):
+    yield preferred
+    while preferred > floor:
+        preferred = max(floor, round(preferred-.25, 2))
+        yield preferred
+
+
+def plan_table_fits(groups, fit):
+    """Try a common size before committing any ink; never shrink just one cell."""
+    if not groups:
+        return []
+    preferred = min(r['preferred_size'] for group in groups for r, _, _, _ in group)
+    best, count = [], -1
+    for size in fit_sizes(max(preferred, 4.0), 4.0):
+        trial, placed = [], []
+        for group in groups:
+            candidates = fit(group, size, placed)
+            trial.append(candidates)
+            if candidates:
+                placed.extend((r, patch, overlay) for (r, patch, _, _), overlay in zip(group, candidates))
+        successful = sum(result is not None for result in trial)
+        if successful > count:
+            best, count = trial, successful
+        if count == len(groups):
+            break
+    return best
+
+
 def apply_graphics(source, target, translator, analyzer, digest, overrides=None):
     import pymupdf as fitz
     from linguafloat.document_core import DocumentError, recoverable_transport
@@ -806,15 +1105,34 @@ def apply_graphics(source, target, translator, analyzer, digest, overrides=None)
     resolver = cached_font[2]
     # Preserve the small discover(page,digest) duck-typed adapter used by manual
     # replay/preview callers; the actual analyzer can skip OCR for disabled kinds.
-    areas = analyzer.discover(source,digest,kinds=kinds) if isinstance(analyzer, GraphicAnalyzer) else analyzer.discover(source,digest)
+    excluded = {key for key, value in (overrides or {}).items() if value.get('skip_figure') is True}
+    atomic = getattr(job, 'workflow', None) == 'graphics'
+    if atomic and getattr(analyzer,'store',None):
+        from linguafloat.document_reviewed import local_review
+        manifest,_=local_review(analyzer.store,digest)
+        excluded.update(manifest.get('preserve_figures',{}).get(AREA_SCHEMA,[]))
+    options = {'excluded_figures':excluded} if excluded else {}
+    areas = analyzer.discover(source,digest,kinds=kinds,**options) if isinstance(analyzer, GraphicAnalyzer) else analyzer.discover(source,digest)
     for area in areas:
         boundary = job.reference_boundary if job.skip_references else {}
+        if area['kind'] == 'table' and area['id'] in getattr(analyzer,'form_owned_tables',{}).get(source.number,()):
+            continue  # The scan form pass owns the complete ruled fields and their labels.
         if reference_page_only(boundary, source.number) or any(
                 fitz.Rect(area["box"]).intersects(fitz.Rect(box))
                 for box in reference_boxes(boundary, source.number)):
             continue
         enabled=job.translate_tables if area["kind"]=="table" else job.translate_figures
         if not enabled:continue
+        start_records, start_placements = len(records), len(placements)
+        whole = atomic and area['kind'] == 'figure'
+        def skip_figure(reason):
+            del placements[start_placements:]
+            del records[start_records:]
+            records.append(dict(page=source.number+1, kind='figure', area_id=area['id'],
+                box=area['box'], status='figure_skipped', reason=reason))
+        if area['kind']=='figure' and area['id'] in excluded:
+            skip_figure('用户指定整图保留，不识别或翻译图内标签。')
+            continue
         candidate_area=dict(area,regions=[])
         for region in area['regions']:
             classification=classify_content(source,area,region,analyzer)
@@ -822,6 +1140,12 @@ def apply_graphics(source, target, translator, analyzer, digest, overrides=None)
                 records.append(dict(region,page=source.number+1,status=classification[0],reason=classification[1]))
             else:candidate_area['regions'].append(region)
         regions=plan_area(source,candidate_area)
+        if whole:
+            unsafe = next((r for r in regions if not (overrides or {}).get(r['id'],{}).get('source')
+                           and (r.get('reason') or r.get('legend_only'))), None)
+            if unsafe or not area['regions']:
+                skip_figure((unsafe.get('reason') or '标签不能安全原位排入') if unsafe else '没有可靠的可译图内文字')
+                continue
         prepared=[]
         for index,entry in enumerate(regions):
             translator.control.checkpoint()
@@ -847,11 +1171,16 @@ def apply_graphics(source, target, translator, analyzer, digest, overrides=None)
                     reason='此前图表连接重试已耗尽；停止余下图表请求，本区域保留原文。请主动重试补译，已有成功缓存保留。'))
                 continue
             patch=None
-            if not reason:patch,reason=glyph_patch(source,region)
+            if not reason and not region.get('legend_only'):patch,reason=glyph_patch(source,region)
             if region.get('erase_boxes'):
                 record['erase_boxes'] = region['erase_boxes']
+            if (not whole and reason and resolver is not None and (reason.startswith('OCR 置信度不足') or
+                    reason.startswith('文字与边界或图线相连')) and corroborated_legend(source,region,analyzer)):
+                region['legend_only']=record['legend_only']=True
+                record['legend_evidence']='局部八倍 OCR 独立核对完整原标签，不擦除原图'
+                reason=''
             if reason:
-                records.append(dict(record,status="needs_review",reason=reason));continue
+                records.append(dict(record,status="needs_review",reason=reason,unsafe_placement=True));continue
             value=correction.get("translation","").strip()
             translator.location=f"PDF 第 {source.number+1} 页 · {area['kind']} {area['id']} · {index+1}"
             analyzer.emit(dict(type="progress",stage="翻译中",stage_key=f"graphics-{source.number}",value=None,
@@ -870,7 +1199,14 @@ def apply_graphics(source, target, translator, analyzer, digest, overrides=None)
                     from linguafloat.document_failures import diagnostic
                     records.append(dict(record, **diagnostic(error, "图表翻译"), status="needs_review"))
                     continue
+            if not value or not value.strip():
+                records.append(dict(record,status='needs_review',reason='未取得有效译文，保留原文。'))
+                continue
             translator.control.checkpoint()
+            if region.get('legend_only'):
+                records.append(dict(record,status='needs_review',legend_eligible=True,translation=value,
+                                    reason='分类代码与说明在同一图内标签；保留原图，整项列入图例。'))
+                continue
             if resolver is not None:
                 # Kept out of the JSON record and detection/translation cache.
                 region['_font_resolver'] = resolver
@@ -878,46 +1214,50 @@ def apply_graphics(source, target, translator, analyzer, digest, overrides=None)
         prepared = compose_native_headers(source, area, prepared, records)
         groups={}
         for entry in prepared:
-            groups.setdefault(entry[0].get("group",entry[0]["id"]),[]).append(entry)
-        for group in groups.values():
-            preferred=min(entry[0]["preferred_size"] for entry in group)
-            sizes=[preferred]
-            # User-approved exception for tiny labels inside figures only.
-            # Tables, side legends and ordinary body text retain their existing
-            # readability floor. Collision/ink checks still gate every size.
-            floor=(4.0 if area['kind']=='figure' and all(
-                fitz.Rect(entry[0]['box']).height<=5.5 or
-                0<float(entry[0].get('native_size') or 0)<=5
-                for entry in group) else 6.0)
-            while sizes[-1] > floor:
-                sizes.append(max(floor,round(sizes[-1]-.25,2)))
-            fitted_group=None
-            for size in sizes:
-                candidates=[fit_label(target,r,value,job.target,translator.control,size,source)
-                            for r,patch,record,value in group]
-                if all(candidates):
-                    # Independently accepted cells still share the page. Check
-                    # previous new ink too, not just the untouched source.
-                    nearby = [(r, patch, fitted) for r, patch, fitted in placements if any(
-                        (fitz.Rect(r.get('layout_box', r['box']))+(-1,-1,1,1)).intersects(
-                            fitz.Rect(current.get('layout_box', current['box'])))
-                        for current, _, _, _ in group)]
-                    previous = [(r, patch, {}, '') for r, patch, _ in nearby]
-                    overlays = [fitted for _, _, fitted in nearby]
-                    if clear_of_original(source,previous+group,overlays+candidates):
-                        fitted_group=candidates;break
-                    for r,_,_,_ in group:
-                        r['_fit_failure']='新文字与保留的表线、数据或其他标签墨迹相碰；需要调整可用空间，不能覆盖科研内容。'
+            r = entry[0]
+            key = tuple(r['cell_box']) if area['kind']=='table' and r.get('cell_box') else r.get('group', r['id'])
+            groups.setdefault(key, []).append(entry)
+
+        def fit(group, size, trial):
+            candidates = [fit_label(target, r, value, job.target, translator.control, size, source)
+                          for r, _, _, value in group]
+            if not all(candidates):
+                return None
+            nearby = [(r, patch, fitted) for r, patch, fitted in (*placements, *trial) if any(
+                (fitz.Rect(r.get('layout_box', r['box']))+(-1,-1,1,1)).intersects(
+                    fitz.Rect(current.get('layout_box', current['box'])))
+                for current, _, _, _ in group)]
+            previous = [(r, patch, {}, '') for r, patch, _ in nearby]
+            overlays = [fitted for _, _, fitted in nearby]
+            if clear_of_original(source, previous+group, overlays+candidates):
+                return candidates
+            for r, _, _, _ in group:
+                r['_fit_failure']='新文字与保留的表线、数据或其他标签墨迹相碰；需要调整可用空间，不能覆盖科研内容。'
+            return None
+
+        table_fits = plan_table_fits(groups.values(), fit) if area['kind']=='table' else None
+        for index, group in enumerate(groups.values()):
+            if table_fits is not None:
+                fitted_group = table_fits[index]
+            else:
+                preferred = min(entry[0]['preferred_size'] for entry in group)
+                # Figure labels have their own floor based on the source label size.
+                floor = 4.0 if all(fitz.Rect(r['box']).height<=5.5 or
+                                   0<float(r.get('native_size') or 0)<=5 for r, _, _, _ in group) else 6.0
+                fitted_group = next((result for size in fit_sizes(preferred, floor)
+                                     if (result := fit(group, size, []))), None)
             if fitted_group is None:
                 failures=[f"区域 {r['id']}：{r['_fit_failure']}" for r,_,_,_ in group if r.get('_fit_failure')]
                 for r,patch,record,value in group:
                     location=f"第 {r['row']} 行、第 {r['column']} 列" if r.get('row') else r['id']
-                    records.append(dict(record,status="needs_review",translation=value,
-                        reason=f"{location}：本组未通过统一排版检查。"+'；'.join(failures)+" 已保留原文和有效译文缓存，可修正排版后仅重新排版。"))
+                    reason=f"{location}：本组未通过统一排版检查。"+'；'.join(failures)+" 已保留原文和有效译文缓存，可修正排版后仅重新排版。"
+                    members = list(zip(r.get('_header_members', []), r.get('_header_translations', [])))
+                    for member, translation in members or [(record, value)]:
+                        records.append(dict(member,status='needs_review',translation=translation,reason=reason,unsafe_placement=True))
                 continue
             for (r,patch,record,value),fitted in zip(group,fitted_group):
                 placements.append((r,patch,fitted))
-                if r.get('header_cell'):
+                if '_header_members' in r:
                     members = r['_header_members']
                     for member, translation in zip(members, r['_header_translations']):
                         records.append(dict(member,status='translated',translation=translation,**fitted[1]))
@@ -925,6 +1265,16 @@ def apply_graphics(source, target, translator, analyzer, digest, overrides=None)
                         records.append(dict(record,status='protected',reason='科学表头按原始矢量字形整体居中。',**fitted[1]))
                 else:
                     records.append(dict(record,status="translated",translation=value,**fitted[1]))
+        if whole:
+            failed = [r for r in records[start_records:] if r['status']=='needs_review']
+            if failed and all(r.get('unsafe_placement') or r.get('legend_eligible') for r in failed):
+                skip_figure(failed[0]['reason'])
+            elif failed:
+                # Keep service/validation failures visible, but do not paint half a figure.
+                del placements[start_placements:]
+                for r in records[start_records:]:
+                    if r['status']=='translated':
+                        r.update(status='not_applied',reason='同图其他请求未通过，未改写此图。')
     # Remove source text before drawing any replacement: adjacent OCR boxes can overlap.
     for region,patch,fitted in placements:
         for box in region.get('erase_boxes', region.get('source_boxes', [region['box']])):
@@ -932,7 +1282,8 @@ def apply_graphics(source, target, translator, analyzer, digest, overrides=None)
     if placements:
         target.apply_redactions(images=0,graphics=0,text=0)
     for region,patch,fitted in placements:
-        target.insert_image(fitz.Rect(patch[1]),stream=patch[0],mask=patch[2])
+        if region.get('source') != 'native':
+            target.insert_image(fitz.Rect(patch[1]),stream=patch[0],mask=patch[2])
     for region,patch,fitted in placements:
         with fitz.open(stream=fitted[0],filetype="pdf") as overlay:
             target.show_pdf_page(target.rect,overlay,0)
