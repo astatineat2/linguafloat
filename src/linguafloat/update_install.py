@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from linguafloat.update_core import (UpdateError, atomic_json, check_archive, load_channel,
@@ -134,7 +134,8 @@ def backup_data(directory: Path) -> None:
             destination = backup / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             if path.suffix == ".sqlite3":
-                with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as src, sqlite3.connect(destination) as dst:
+                # A sqlite3 connection context commits transactions but leaves Windows file handles open.
+                with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as src, closing(sqlite3.connect(destination)) as dst:
                     src.backup(dst)
             else:
                 shutil.copy2(path, destination)

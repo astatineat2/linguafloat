@@ -8,12 +8,12 @@ from linguafloat import __version__
 from linguafloat.update_core import atomic_json, check_archive, load_channel, parse_manifest, sha256_file
 
 
-def main():
+def main(app=None, out=None):
     tag = 'v'+__version__
     previous = ROOT/'release-assets/v0.19.9'
-    out = ROOT/'release-assets'/tag
-    out.mkdir(exist_ok=True)
-    app = ROOT/'exe'
+    out = out or ROOT/'release-assets'/tag
+    out.mkdir(parents=True,exist_ok=True)
+    app = app or ROOT/'exe'
     pkg = out/f'LinguaFloat-{tag}-win-x64.zip'
     old = next(previous.glob('*win-x64.zip'))
     check_archive(old, parse_manifest((previous/'update.json').read_bytes(), (previous/'update.json.sig').read_bytes(), load_channel(), '0.11.0'))
@@ -37,13 +37,14 @@ def main():
     check_archive(pkg,parse_manifest(manifest.read_bytes(),sig,load_channel(),'0.11.0'))
 
 
-def sources():
-    out=ROOT/'release-assets'/('v'+__version__)
+def sources(out=None):
+    out=out or ROOT/'release-assets'/('v'+__version__)
     old=ROOT/'release-assets/v0.19.9'
     base=next(old.glob('*corresponding-source.zip'))
     checks=dict(line.split('  ',1)[::-1] for line in (old/'SHA256SUMS.txt').read_text().splitlines())
     assert sha256_file(base)==checks[base.name]
     commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+    changed=set(subprocess.check_output(['git','diff','--name-only','-z','v0.19.9',commit]).decode().strip('\0').split('\0'))
     tracked=set(subprocess.check_output(['git','ls-tree','-r','--name-only','-z',commit]).decode().strip('\0').split('\0'))
     additional={'scripts/'+n+'.py' for n in ('accept_legacy_upgrade','build_legacy_repair','legacy_update_repair','prepare_legacy_upgrade_release','verify_portable_install_path')}
     with zipfile.ZipFile(base) as src,zipfile.ZipFile(out/f'LinguaFloat-v{__version__}-corresponding-source.zip','x',compression=zipfile.ZIP_DEFLATED,compresslevel=1) as dst:
@@ -61,5 +62,5 @@ def sources():
 
 if __name__ == '__main__':
     if '--source' in sys.argv:
-        changed=set(subprocess.check_output(['git','diff','--name-only','-z','v0.19.9','HEAD']).decode().strip('\0').split('\0'));sources()
+        sources()
     else:main()

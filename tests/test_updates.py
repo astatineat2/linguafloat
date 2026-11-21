@@ -15,6 +15,32 @@ from linguafloat import update_core as core
 from linguafloat import update_install as installer
 
 
+def test_backup_releases_history_handles_before_rollback(tmp_path, monkeypatch):
+    import gc
+    import sqlite3
+    from contextlib import closing
+    monkeypatch.setenv('APPDATA', str(tmp_path))
+    history = tmp_path / 'LinguaFloat/documents/jobs.sqlite3'
+    history.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(history)) as db:
+        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('CREATE TABLE history (value TEXT)')
+        db.execute("INSERT INTO history VALUES ('old')")
+        db.commit()
+    job = tmp_path / 'job'; job.mkdir()
+    enabled = gc.isenabled(); gc.disable()
+    try:
+        installer.backup_data(job)
+        with closing(sqlite3.connect(history)) as db:
+            db.execute("UPDATE history SET value='new'"); db.commit()
+        installer.restore_data(job)
+        with closing(sqlite3.connect(history)) as db:
+            assert db.execute('SELECT value FROM history').fetchall() == [('old',)]
+    finally:
+        if enabled: gc.enable()
+        gc.collect()
+
+
 @pytest.fixture
 def signed():
     value = json.loads((Path(__file__).parent / "fixtures/update-signature.json").read_text())

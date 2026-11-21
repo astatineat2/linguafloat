@@ -12,13 +12,13 @@ from linguafloat import __version__
 from linguafloat.update_core import load_channel, sha256_file, verify_signature
 
 
-def main():
+def main(app=None, out=None):
     stage = ROOT / '.scratch/repair-build'
     stage.mkdir(parents=True, exist_ok=True)
-    out = ROOT / 'release-assets' / ('v' + __version__)
-    out.mkdir(exist_ok=True)
+    out = out or ROOT / 'release-assets' / ('v' + __version__)
+    out.mkdir(parents=True,exist_ok=True)
     payload = stage / 'LinguaFloatUpdater.exe'
-    shutil.copy2(ROOT / 'exe' / payload.name, payload)
+    shutil.copy2((app or ROOT / 'exe') / payload.name, payload)
     known = {}
     for version in ('0.11.0', '0.11.1'):
         directory = ROOT / 'release-assets' / ('v' + version)
