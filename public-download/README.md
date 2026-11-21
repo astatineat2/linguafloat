@@ -4,7 +4,7 @@
 
 [下载稳定版](https://github.com/astatineat2/linguafloat-releases/releases/latest) · [查看源码](https://github.com/astatineat2/linguafloat) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
 
-v0.11.0 / v0.11.1 如遇“程序安装目录无效”，只打开要升级的旧版，运行 [v0.11 更新修复工具](https://github.com/astatineat2/linguafloat-releases/releases/download/v0.19.10/LinguaFloat-Repair-v011.exe)，确认位置后回到「帮助与更新」检查、下载、安装并重启。无需移动安装目录或重新配置。
+v0.11.0 / v0.11.1 如遇“程序安装目录无效”，只打开要升级的旧版，运行 [v0.11 更新修复工具](https://github.com/astatineat2/linguafloat-releases/releases/download/v0.19.11/LinguaFloat-Repair-v011.exe)，确认位置后回到「帮助与更新」检查、下载、安装并重启。无需移动安装目录或重新配置。
 
 ## 为什么做 LinguaFloat
 

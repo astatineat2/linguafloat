@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
 from linguafloat.update_core import atomic_json, check_archive, load_channel, parse_manifest, sha256_file
 from legacy_update_repair import running_apps
+from linguafloat import __version__
 
 
 def wait(fn, timeout=120):
@@ -48,7 +49,6 @@ def popup(text, button, proc):
 
 def signed(version):
     folder=ROOT/'release-assets'/('v'+version)
-    if version=='0.19.10' and '--rebuild' in sys.argv:folder=ROOT/'.scratch/rollback-fixed/v0.19.10'
     p=next(folder.glob('*win-x64.zip'))
     r=parse_manifest((folder/'update.json').read_bytes(),(folder/'update.json.sig').read_bytes(),load_channel(),'0.11.0')
     check_archive(p,r);return folder,p,r
@@ -56,10 +56,12 @@ def signed(version):
 
 def run(version, shallow=True, ui=False, rollback=False):
     import psutil
-    old,oldzip,_=signed(version);new,pkg,r=signed('0.19.9' if '--baseline-0199' in sys.argv else '0.19.10');exe='LinguaFloat.exe'
+    old,oldzip,_=signed(version);new,pkg,r=signed('0.19.9' if '--baseline-0199' in sys.argv else __version__);exe='LinguaFloat.exe'
     if any(p.name().casefold()==exe.casefold() for p in psutil.process_iter()):raise RuntimeError('Close existing LinguaFloat before isolated acceptance')
-    with tempfile.TemporaryDirectory(prefix='LF 旧版 '+version+' ',dir=ROOT.anchor if shallow else ROOT/'.scratch') as raw, tempfile.TemporaryDirectory() as pf:
-        target=Path(raw).resolve();profile=Path(pf).resolve();assert profile.drive!=target.drive
+    drive=next((a.partition('=')[2].upper() for a in sys.argv if a.startswith('--drive=')),None)
+    if drive and (not shallow or drive not in ('C','D','E')):raise ValueError('Unsupported test drive')
+    with tempfile.TemporaryDirectory(prefix='LF 旧版 '+version+' ',dir=(drive+':/' if drive else ROOT.anchor) if shallow else ROOT/'.scratch') as raw, tempfile.TemporaryDirectory() as pf:
+        target=Path(raw).resolve();profile=Path(pf).resolve();assert profile.drive.upper()=='C:'
         local=profile/'local';roam=profile/'roam'; cfg=roam/'LinguaFloat/config.json';cfg.parent.mkdir(parents=True)
         atomic_json(cfg,dict(first_run_complete=True,update_auto_check=False,game_mode='on',providers=[]));original=cfg.read_bytes()
         history=cfg.parent/'documents/jobs.sqlite3';history.parent.mkdir();
@@ -139,7 +141,8 @@ def run(version, shallow=True, ui=False, rollback=False):
             db.close();row=dict(from_version=version,to_version=r.version,package_sha256=r.sha256,old_pid=proc.pid,new_pid=child.pid,
                      old_exe=str(target/exe),new_exe=child.exe(),restarted_in_place=True,configuration_preserved=True,history_preserved=True,other_unchanged=True,
                      old_helper_rejected=shallow,used_repair=shallow,cache_drive=local.drive,gui=ui,transport='public GUI check, signed cached ZIP' if ui else 'signed release files staged; helper handoff simulated, no GUI download click')
-            atomic_json(new/f'accept-{version}-{int(shallow)}-{int(ui)}.json',row);print(json.dumps(row,ensure_ascii=False),flush=True)
+            suffix='-'+drive if drive else ''
+            atomic_json(new/f'accept-{version}-{int(shallow)}-{int(ui)}{suffix}.json',row);print(json.dumps(row,ensure_ascii=False),flush=True)
         finally:
             for p in (repair,helper,proc):
                 if p is not None and p.poll() is None:
@@ -149,6 +152,7 @@ def run(version, shallow=True, ui=False, rollback=False):
                 if p.info['exe'] and Path(p.info['exe'])==target/exe:p.terminate();p.wait(20)
             if backup and backup.parent==target.parent/'LinguaFloat-backups' and backup.name==f'v{version}-'+job.name and backup.is_dir():shutil.rmtree(backup)
             (target.parent/('.'+target.name+'-update.lock')).unlink(missing_ok=True)
+            (target.parent/'LinguaFloat-backups'/('.'+target.name+'-update.lock')).unlink(missing_ok=True)
 
 
 def isolated_desktop():

@@ -15,6 +15,20 @@ from linguafloat import update_core as core
 from linguafloat import update_install as installer
 
 
+def test_install_lock_supports_parent_that_allows_directories_only(tmp_path, monkeypatch):
+    target = tmp_path / 'portable'; target.mkdir()
+    original = Path.open
+    def restricted(path, *args, **kwargs):
+        if path.parent == tmp_path:
+            raise PermissionError('root allows new directories, not files')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', restricted)
+    with installer.installation_lock(target):
+        with pytest.raises(core.UpdateError):
+            with installer.installation_lock(target):
+                pytest.fail('concurrent lock was granted')
+
+
 def test_backup_releases_history_handles_before_rollback(tmp_path, monkeypatch):
     import gc
     import sqlite3

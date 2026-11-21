@@ -48,11 +48,16 @@ def load_request(directory: Path) -> dict:
 @contextmanager
 def installation_lock(target: Path):
     import msvcrt
-    path = target.parent / ("." + target.name + "-update.lock")
+    # Standard Windows accounts may create a directory, but not a file, at C:\.
+    # Keep the lock outside both directories that the updater renames.
+    folder = target.parent / 'LinguaFloat-backups'
+    if folder.resolve() != folder or folder.is_symlink():
+        raise UpdateError(f'更新备份目录不是独立目录：{folder}')
+    folder.mkdir(exist_ok=True)
+    path = folder / ("." + target.name + "-update.lock")
+    if path.resolve() != path or path.is_symlink():
+        raise UpdateError(f'更新锁位置无效：{path}')
     with path.open("a+b") as stream:
-        stream.seek(0)
-        stream.write(b"0")
-        stream.flush()
         stream.seek(0)
         try:
             msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
