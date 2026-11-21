@@ -111,12 +111,16 @@ def test_changed_destination_is_rejected_before_erasure():
         assert page.get_pixmap().samples == before
 
 
-def test_actual_native_page_fixed_chinese(tmp_path):
+@pytest.mark.parametrize('var,filename', [
+    ('WALNUT_SOURCE_PDF', 'Walnut Pellicle Polyphenols Trigger Lactiplantibacillus plantarum DX7 to Produce Indole-3-Lactic Acid.pdf'),
+    ('AHR_SOURCE_PDF', 'Lactiplantibacillus plantarum-Derived Indole-3-lactic Acid Ameliorates Intestinal Barrier Integrity through the AhR-Nrf2-NF-κB Axis.pdf'),
+])
+def test_actual_native_page_fixed_chinese(tmp_path, var, filename):
+    from linguafloat.document_clip import prepare_text_redaction, show_source_region
     from linguafloat.document_navigation import plan_navigation, render_navigation
-    path = Path(os.environ.get('WALNUT_SOURCE_PDF', str(Path.home() / 'Downloads' /
-        'Walnut Pellicle Polyphenols Trigger Lactiplantibacillus plantarum DX7 to Produce Indole-3-Lactic Acid.pdf')))
+    path = Path(os.environ.get(var, str(Path.home() / 'Downloads' / filename)))
     if not path.exists():
-        pytest.skip('Local Walnut source unavailable')
+        pytest.skip('Local navigation source unavailable')
     fixed = {'Read Online': '在线阅读', 'ACCESS': '访问', 'Metrics & More': '指标与更多',
              'Article Recommendations': '文章推荐', 'Supporting Information': '补充信息'}
     with fitz.open(path) as source, fitz.open() as output:
@@ -130,6 +134,7 @@ def test_actual_native_page_fixed_chinese(tmp_path):
         # Replay the existing graphic_source restoration path, including the
         # two overlapping text layers in the supporting-information icon.
         page = output[0]
+        prepare_text_redaction(page)
         for region in group['preserve']:
             rect = fitz.Rect(region['box'])
             page.add_redact_annot(rect, fill=False, cross_out=False)
@@ -137,10 +142,11 @@ def test_actual_native_page_fixed_chinese(tmp_path):
             # must restore its own exact URI annotations from source evidence.
             page.apply_redactions(images=0, graphics=0, text=0)
             page.draw_rect(rect, color=None, fill=(1, 1, 1))
-            page.show_pdf_page(rect, source, 0, clip=rect)
+            show_source_region(page, rect, source, 0)
         # Match the documented integration call after legacy restoration.
         page = output.reload_page(page)
-        icon = fitz.Rect(430, 224, 445, 240)
+        x, y = group['items'][-1]['box'][:2]
+        icon = fitz.Rect(x-17, y-5, x-2, y+11)
         before_icon = output[0].get_pixmap(matrix=fitz.Matrix(3, 3), clip=icon).samples
         assert before_icon == source[0].get_pixmap(matrix=fitz.Matrix(3, 3), clip=icon).samples
         result = render_navigation(source[0], output[0], group, {i['id']: fixed[i['text']] for i in group['items']})
@@ -149,6 +155,17 @@ def test_actual_native_page_fixed_chinese(tmp_path):
         output[0].get_pixmap(matrix=fitz.Matrix(3, 3), clip=fitz.Rect(25, 188, 590, 250)).save(tmp_path / 'navigation-fixed-local.png')
         for value in fixed.values():
             assert value in output[0].get_text()
+        import numpy as np
+        # A shifted English suffix may survive outside the checked item boxes.
+        band = fitz.Rect(25, 188, 590, 250)
+        def pixels(p):
+            pix = p.get_pixmap(matrix=fitz.Matrix(3, 3), clip=band)
+            return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)
+        diff = np.any(pixels(source[0]) != pixels(output[0]), axis=2)
+        for item in group['items']:
+            r = ((fitz.Rect(item['box']) + (-2,-3,2,3)) * fitz.Matrix(3,3)).irect
+            diff[max(0,r.y0-564):max(0,r.y1-564), max(0,r.x0-75):max(0,r.x1-75)] = False
+        assert not diff.any(), 'Navigation replacement changed artwork or left displaced text'
         with fitz.open(tmp_path / 'navigation-fixed-local.pdf') as saved:
             assert sorted((l['kind'], l.get('uri', ''), tuple(l['from'])) for l in saved[0].get_links()) == before_links
             assert saved[0].get_pixmap(matrix=fitz.Matrix(3, 3), clip=icon).samples == before_icon

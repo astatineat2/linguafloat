@@ -1003,7 +1003,8 @@ def fit_header(page, region, target, control, size, source):
                     for clip, dx, original_baseline, art_doc, art_page in atom['vectors']:
                         dest = f.Rect(x+dx, baseline+clip.y0-original_baseline,
                                       x+dx+clip.width, baseline+clip.y1-original_baseline)
-                        p.show_pdf_page(dest, art_doc, art_page, clip=clip)
+                        from linguafloat.document_clip import show_source_region
+                        show_source_region(p, dest, art_doc, art_page, clip=clip)
             for atom,x in positioned:
                 if not atom.get('vectors'):
                     if resolver:
@@ -1121,7 +1122,9 @@ def fit_label(page,region,text,target,control,size,source=None):
             sx=x+font.text_length(text,fontsize=size)+gap
             dest=f.Rect(sx,10+(height-sh)/2,sx+sw,10+(height+sh)/2)
             # Preserve original vector glyphs / pixels and superscripts, unscaled.
-            p.show_pdf_page(dest,source.parent,source.number,clip=suffix,rotate=(360-rotation)%360 if rotated else 0)
+            from linguafloat.document_clip import show_source_region
+            show_source_region(p, dest, source.parent, source.number, clip=suffix,
+                               rotate=(360-rotation)%360 if rotated else 0)
         out=overlay.new_page(width=page.rect.width,height=page.rect.height)
         out.show_pdf_page(box,temp,0,clip=f.Rect(10,10,10+width,10+height),rotate=rotation if rotated else 0)
         metadata=dict(size=size,rows=len(lines),layout_box=list(box),

@@ -483,7 +483,15 @@ def merge_formula_runs(parts, size):
         f = part.pdf_formula
         if not f:
             continue
-        if getattr(f, "_lf_caption_marker", False):
+        # A raised reference after an author citation is not the integer
+        # part of the measurement which starts the following clause.
+        raised_digits = ((f.y_offset or 0) > 0 and not f.pdf_curve and not f.pdf_form
+                         and all(c.pdf_style and (c.pdf_style.font_size or size) < size*.85
+                                 for c in f.pdf_character)
+                         and re.fullmatch(r'\d+(?:[,–-]\d+)*', ''.join(
+                             c.char_unicode or '' for c in f.pdf_character).strip()))
+        author_citation = raised_digits and re.search(r'\bet\s+al\.\s*[,;:]?\s*$', text[max(0, offsets[i][0]-24):offsets[i][0]], re.I)
+        if getattr(f, "_lf_caption_marker", False) or author_citation:
             blocked.add(i)
         else:
             # Runtime markers do not survive every cache format, and the late
@@ -590,6 +598,12 @@ def check_formula_tokens(translate_input, output):
             continue
         glyphs = ''.join(c.char_unicode or '' for c in p.formula.pdf_character).strip()
         prefix = re.sub(r'<[^>]+>', '', translate_input.unicode.partition(p.placeholder)[0])
+        if re.fullmatch(r'\d+(?:[,–-]\d+)*', glyphs) and re.search(r'\bet\s+al\.\s*[,;:]?\s*$', prefix, re.I):
+            citations.add(p.placeholder)
+            plain = re.sub(r'<[^>]+>', '', output)
+            before, _, after = plain.partition(p.placeholder)
+            if re.search(r'[将把取加用]\s*$', before) and re.match(r'\s*\d', after):
+                return False
         single_after_sentence = (re.fullmatch(r'\d+',glyphs) and re.search(
             r'(?:[A-Za-z]{2,}\d*|\bv\d+(?:\.\d+)+)\.$', prefix, re.I))
         if re.fullmatch(r'\d+(?:,\d+)+', glyphs) or single_after_sentence:

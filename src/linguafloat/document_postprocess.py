@@ -34,7 +34,8 @@ def save_body_artifact(output, job, body, page_map, translator):
     folder = Path(output) / FOLDER
     folder.mkdir()
     path = folder / "body.pdf"
-    body.save(path, garbage=2, deflate=True)
+    from linguafloat.document_pdf import save_composed_pdf
+    save_composed_pdf(body, path)
     manifest = dict(schema=SCHEMA, parent_job_id=job.job_id, source_sha256=digest(job.source),
         source=str(Path(job.source).resolve()), body_sha256=digest(path), pages=page_map,
         provider=provider_identity(job.provider), target=job.target, source_language=job.source_language,

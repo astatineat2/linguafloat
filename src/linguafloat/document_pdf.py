@@ -177,6 +177,54 @@ def render_text_pdf(text, path, page_number):
                 raise DocumentError("单页译文过长，无法排版。")
 
 
+def save_composed_pdf(document, target):
+    """Collect grafted resources after all page copies, overlays and links exist."""
+    import os
+    import tempfile
+    import pymupdf as fitz
+
+    document.save(str(target), garbage=4, deflate=True)
+    # Type0 overlays can reintroduce full CJK fonts after the engine subset.
+    # Reopening also resolves duplicate references left by the first GC pass.
+    with fitz.open(target) as baseline:
+        if (baseline.is_form_pdf or baseline.get_ocgs() or baseline.is_encrypted
+                or any(page.first_annot for page in baseline)):
+            return
+        big_font = any(baseline.xref_get_key(x, 'Length1')[0] == 'int' and
+                       int(baseline.xref_get_key(x, 'Length1')[1]) > 2_000_000
+                       for x in range(1, baseline.xref_length()))
+        # After grafting, identical images may still have different indirect
+        # colour-space or mask references at the first save. MuPDF checks the
+        # complete objects, not just compressed pixels, on the second pass.
+        image_refs = {row[0] for page in baseline for row in page.get_images()}
+        if not big_font and len(image_refs) < 2:
+            return
+    fd, candidate = tempfile.mkstemp(dir=Path(target).parent, suffix='.pdf')
+    os.close(fd)
+    try:
+        with fitz.open(target) as compact:
+            if big_font:
+                compact.subset_fonts()
+            compact.save(candidate, garbage=4, deflate=True)
+        if os.path.getsize(candidate) >= os.path.getsize(target):
+            return
+        with fitz.open(target) as before, fitz.open(candidate) as after:
+            if len(before) != len(after) or before.get_toc() != after.get_toc():
+                return
+            def links(page):
+                return [{k: v for k, v in link.items() if k != 'xref'} for link in page.get_links()]
+            for a, b in zip(before, after, strict=True):
+                if (links(a) != links(b) or a.get_text('words') != b.get_text('words') or
+                        a.get_pixmap().samples != b.get_pixmap().samples):
+                    return
+        os.replace(candidate, target)
+    except (RuntimeError, ValueError, OSError) as exc:
+        import logging
+        logging.getLogger(__name__).warning('Optional PDF compaction skipped: %s', exc)
+    finally:
+        Path(candidate).unlink(missing_ok=True)
+
+
 def append_bilingual(dual, source, number, fragment, arrangement):
     """A fragment belongs to exactly one source page, including its continuations."""
     import pymupdf as fitz
@@ -185,6 +233,9 @@ def append_bilingual(dual, source, number, fragment, arrangement):
         start = len(dual)
         dual.insert_pdf(source, from_page=number, to_page=number)
         dual.insert_pdf(fragment)
+        from linguafloat.document_panel_text import promote_verified_panel
+        for offset in range(len(fragment)):
+            promote_verified_panel(dual[start + 1 + offset])
         for index, page in enumerate((source[number], *fragment)):
             links = [dict(uri=uri, **{'from': link['from']}) for link in page.get_links()
                      if (uri := external_web_uri(page, link)) and uri.startswith('www.')]
@@ -540,7 +591,7 @@ def translate_reading_pdf(job, translator, output, emit):
             if enabled:
                 target = output / f"{Path(job.source).stem}.{label}.pdf"
                 emit({"type": "progress", "stage": "保存中", "value": None, "message": f"保存{label}"})
-                document.save(str(target), garbage=4, deflate=True)
+                save_composed_pdf(document, target)
                 outputs.append(str(target))
     if scanned:
         warnings.append(f"{scanned} 页使用了本地 OCR；复杂表格、公式和手写文字需人工核对。")
@@ -1039,7 +1090,11 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                 if layout is not None:
                     append_packed_continuations(fragment, rendered, number, indices, layout, control)
                 started = active_clock(control)
-                for region in (retained_regions or {}).get(number, []):
+                regions = (retained_regions or {}).get(number, [])
+                if regions:
+                    from linguafloat.document_clip import prepare_text_redaction
+                    prepare_text_redaction(fragment[0])
+                for region in regions:
                     control.checkpoint()
                     original = source[number]
                     if publication.get(number,{}).get('contacts'):
@@ -1130,7 +1185,7 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                 target = output / f"{Path(job.source).stem}.{label}.pdf"
                 progress(f"整理 PDF 资源并写入{label}文件")
                 started = active_clock(control)
-                document.save(str(target), garbage=4, deflate=True)
+                save_composed_pdf(document, target)
                 measured(f"{label}资源整理及写入", started)
                 paths.append(str(target))
     return paths

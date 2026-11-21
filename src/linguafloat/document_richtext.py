@@ -303,6 +303,20 @@ def remap_unchanged_prose(paragraph, translate_input, output):
             part.pdf_same_style_characters = None
 
 
+def source_word_boundaries(source, text):
+    """Only restore scientific word spaces explicitly present in the source."""
+    terms = re.finditer(r'(?<![A-Za-z])(?:[A-Z]\.\s*([a-z]{3,})\s+([A-Z][A-Z0-9-]*\d[A-Z0-9-]*)|((?:[munpµμ]?mol))\s+([A-Z][A-Za-z]*(?=[/²³\d⁰-⁹])))', source)
+    positions = set()
+    for m in terms:
+        a, b = (m[1], m[2]) if m[1] else (m[3], m[4])
+        for hit in re.finditer(r'(?<![A-Za-z0-9])'+re.escape(a+b)+r'(?![A-Za-z0-9])', text):
+            positions.add(hit.start()+len(a))
+            if (m[1] and re.match(r'[A-Z]\.\s+', m[0]) and hit.start() >= 2
+                    and text[hit.start()-2:hit.start()] == m[0][:2]):
+                positions.add(hit.start())
+    return positions
+
+
 def normalize_prose_spaces(paragraph):
     """Normalize ASCII spaces across adjacent translated runs, never formulas."""
     groups, runs = [], []
@@ -319,11 +333,12 @@ def normalize_prose_spaces(paragraph):
     pattern = re.compile(f'(?<=[{han}]) +(?=[{han}，。；：！？、）】])|(?<=[（【]) +(?=[{han}])')
     for group in groups:
         text = ''.join(r.unicode or '' for r in group)
+        spaces = source_word_boundaries(getattr(paragraph, 'unicode', '') or '', text)
         removed = {i for m in pattern.finditer(text) for i in range(m.start(), m.end())}
         offset = 0
         for run in group:
             old = run.unicode or ''
-            run.unicode = ''.join(c for i,c in enumerate(old, offset) if i not in removed)
+            run.unicode = ''.join((' ' if i in spaces else '') + c for i,c in enumerate(old, offset) if i not in removed)
             offset += len(old)
             changed += old != run.unicode
     return changed

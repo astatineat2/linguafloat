@@ -122,30 +122,8 @@ def restore_publisher_footer(source, target):
 
 
 def _explicit_text_matrices(page):
-    """Make BT's implicit identity reset explicit before MuPDF text filtering."""
-    doc = page.parent
-    for xref in set(page.get_contents() + [item[0] for item in page.get_xobjects()]):
-        data = doc.xref_stream(xref)
-        buffer = fitz.JM_BufferFromBytes(data)
-        stream = fitz.mupdf.fz_open_buffer(buffer)
-        lexer = fitz.mupdf.PdfLexbuf(256)
-        ends = []
-        while True:
-            token = fitz.mupdf.pdf_lex(stream, lexer)
-            if token == fitz.mupdf.PDF_TOK_EOF:
-                break
-            if token == fitz.mupdf.PDF_TOK_KEYWORD:
-                word = lexer.m_internal.scratch
-                if word == 'BI':
-                    # Binary inline-image data cannot be traversed as PDF tokens.
-                    return False
-                if word == 'BT':
-                    ends.append(fitz.mupdf.fz_tell(stream))
-        for end in reversed(ends):
-            data = data[:end] + b' 1 0 0 1 0 0 Tm ' + data[end:]
-        if ends:
-            doc.update_stream(xref, data)
-    return True
+    from linguafloat.document_clip import prepare_text_redaction
+    return prepare_text_redaction(page, strict=True)
 
 
 def _replace_footer(source, target, rect):

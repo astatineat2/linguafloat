@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "linguafloat"
-version = "0.19.6"
+version = "0.19.8"
 description = "A Windows selection translator with a floating result window."
 readme = "README.md"
 requires-python = ">=3.11"

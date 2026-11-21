@@ -26,7 +26,7 @@ for path in (root / "src/linguafloat").glob("*.py"):
     if path.stem in {"__main__", "cc_switch_ui"}:
         continue
     module = "linguafloat" if path.stem == "__init__" else f"linguafloat.{path.stem}"
-    if path.stem in {'document_clip','document_reviewed','document_glyph_patch'}:
+    if path.stem in {'document_panel_text','document_clip','document_reviewed','document_glyph_patch'}:
         assert (args.dist_dir/'document-runtime/src/linguafloat'/path.name).read_bytes()==path.read_bytes()
         checked+=1
         continue
