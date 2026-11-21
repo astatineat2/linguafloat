@@ -96,6 +96,10 @@ def test_limited_api_uses_signed_public_assets_without_repeating_api(signed, tmp
         cache = tmp_path / "check.json"
         assert core.check_latest(client, channel, "0.11.0", cache, now=100).version == "0.12.0"
         assert core.check_latest(client, channel, "0.11.0", cache, now=110).version == "0.12.0"
+        state = json.loads(cache.read_text())
+        assert base64.b64decode(state['payload']) == payload
+        assert state['signature'].encode() == signature
+        assert 'etag' not in state and state['retry_after'] > 110
     assert sum(r.url.host == "api.github.com" for r in calls) == 1
     assert len(calls) == 5
 

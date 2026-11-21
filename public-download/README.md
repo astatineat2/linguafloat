@@ -2,9 +2,9 @@
 
 **面向大学生、科研学习者和外服游戏玩家的 Windows 桌面翻译工具。**
 
-[下载 v0.19.8](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.8) · [查看源码](https://github.com/astatineat2/linguafloat) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
+[下载 v0.19.9](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.9) · [查看源码](https://github.com/astatineat2/linguafloat) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md)
 
-**当前版本：v0.19.8。** 改善原译交替 PDF 译页的局部文字选择，并包含首页导航修复。提供便携 ZIP、对应源码及校验文件。此版需手动下载，不通过软件内自动更新推送。
+**当前版本：v0.19.9。** 改善原译交替 PDF 译页的局部文字选择，并包含首页导航修复。提供便携 ZIP、对应源码及校验文件。本版支持软件内下载、安装和重启。
 
 ## 为什么做 LinguaFloat
 
@@ -31,9 +31,9 @@ LinguaFloat 最初是为了玩外服游戏时，看懂屏幕上的外文对话�
 
 ## 下载与开始使用
 
-当前版本：**v0.19.8 · Windows x64**。本版不制作安装包。
+当前版本：**v0.19.9 · Windows x64**。本版不制作安装包。
 
-1. 前往 [v0.19.8 下载页](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.8)，下载 `LinguaFloat-v0.19.8-win-x64.zip`。
+1. 前往 [v0.19.9 下载页](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.9)，下载 `LinguaFloat-v0.19.9-win-x64.zip`。
 2. 完整解压到有写入权限的目录，运行 `LinguaFloat.exe`。**无需安装 Python**；请保留 `_internal`、`document-runtime` 和更新助手，不要只复制 EXE。
 3. 首次进入可配置翻译服务并保存，或跳过后从配置入口设置。保存不会自动请求接口；“获取模型”或实际翻译由用户主动触发。详细步骤见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
 
@@ -43,7 +43,7 @@ LinguaFloat 最初是为了玩外服游戏时，看懂屏幕上的外文对话�
 
 取词和游戏画面兼容性因软件而异；独占全屏或受保护画面可能无法截图。复杂扫描件、图表和公式的译文排版需要检查，不保证所有文件无损还原。当前程序没有 Windows Authenticode 签名；下载及更新校验、网络说明见 [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md)。
 
-## 当前版本 · v0.19.8
+## 当前版本 · v0.19.9
 
 - 原译交替导出时，符合条件的译页使用页面文字，便于选取局部内容。WPS 的整页误选仍待实机确认，已有 PDF 不会自动改变。
 
@@ -52,7 +52,7 @@ LinguaFloat 最初是为了玩外服游戏时，看懂屏幕上的外文对话�
 - 中文混合科学表头整格紧凑居中，保留原始科学字形及上下标，数据与表格边界不移动。
 - 独立表格随正文处理，图片在正文完成后由用户确认补译；结果另存且复用合格缓存。
 - 改善日期、作者联系方式、字体、公式/参考文献保护、请求诊断与部分完成状态。复杂图文和译文语义仍需人工检查。
-- 本版供手动下载，原签名更新通道与公钥保持不变；不重新制作安装程序、不恢复安装验收。
+- 可在软件内升级，也可手动下载；沿用原签名公钥；不重新制作安装程序、不恢复安装验收。
 
 [查看完整更新日志](https://github.com/astatineat2/linguafloat-releases/blob/main/CHANGELOG.md) · [发布验证与实测范围](https://github.com/astatineat2/linguafloat-releases/blob/main/验证记录.md)
 

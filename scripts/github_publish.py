@@ -11,6 +11,7 @@ import hashlib
 import time
 
 import httpx
+from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -98,7 +99,20 @@ def publish(client):
     from linguafloat.update_core import check_archive, load_channel, parse_manifest, sha256_file
     payload = (folder / "update.json").read_bytes()
     release = parse_manifest(payload, (folder / "update.json.sig").read_bytes(), load_channel(), __version__)
+    expected_url = f"https://github.com/{OWNER}/linguafloat-releases/releases/download/v{__version__}/{required[0]}"
+    if release.version != __version__ or release.url != expected_url:
+        raise SystemExit("签名清单与待发布的版本或便携包下载地址不一致。")
     check_archive(folder / required[0], release)
+    try:
+        acceptance = json.loads((folder / 'UPGRADE-ACCEPTANCE.json').read_text(encoding='utf-8'))
+        accepted = (acceptance['to_version'] == release.version
+                    and Version(acceptance['from_version']) < Version(release.version)
+                    and acceptance['package_sha256'] == sha256_file(folder / required[0])
+                    and acceptance['restarted_in_place'] is True and acceptance['configuration_preserved'] is True)
+    except (OSError, ValueError, TypeError, KeyError):
+        accepted = False
+    if not accepted:
+        raise SystemExit('缺少与当前便携包匹配的旧版升级验收记录，不上传、不切换 Latest。')
     checksums = dict(line.split("  ", 1)[::-1] for line in (folder / "SHA256SUMS.txt").read_text().splitlines())
     for name in required[:-1]:
         if sha256_file(folder / name) != checksums[name]:
@@ -141,9 +155,21 @@ def publish(client):
         print("Verified uploaded: " + name, flush=True)
     # Only a complete set of reviewed assets is published.
     uploaded = request(client, "GET", base + "/" + str(created["id"]) + "/assets?per_page=100")
-    if {a["name"] for a in uploaded} != set(required):
+    if len(uploaded) != len(required) or {a["name"] for a in uploaded} != set(required):
         raise SystemExit("草稿附件集合不完整或含额外附件，未公开。")
-    info = request(client, "PATCH", base + "/" + str(created["id"]), json={"draft": False})
+    for asset in uploaded:
+        path = folder / asset['name']
+        if (asset.get('state') != 'uploaded' or asset.get('digest') != 'sha256:' + sha256_file(path)
+                or asset.get('size') != path.stat().st_size):
+            raise SystemExit("发布前复核失败；保留草稿，不切换稳定通道。")
+    previous = client.get('https://api.github.com' + base + '/latest')
+    if previous.status_code != 404:
+        previous.raise_for_status()
+        if Version(previous.json()['tag_name'].removeprefix('v')) >= Version(__version__):
+            raise SystemExit("稳定版已是同版或更高版本，不更改 Latest。")
+    info = request(client, "PATCH", base + "/" + str(created["id"]), json={"draft": False, "prerelease": False, "make_latest": "true"})
+    if request(client, 'GET', base + '/latest')['id'] != created['id']:
+        raise SystemExit("版本已公开，但尚未确认 Latest 指向新版；请核对后再通知用户。")
     print(info["html_url"])
 
 

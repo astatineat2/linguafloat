@@ -29,7 +29,34 @@ def test_failed_check_has_explicit_reason_and_no_install_action(controller):
     app, _, _ = controller
     app.help._failed("GitHub 暂时限制访问频率")
     assert "限制" in app.help.dialog.status.text()
-    assert not app.help.dialog.install_button.isEnabled()
+    assert not app.help.dialog.download_button.isEnabled()
+
+
+def test_one_click_waits_for_running_job_after_verified_download(controller, monkeypatch, tmp_path):
+    app, _, _ = controller
+    h = app.help
+    assert h.dialog.download_button.text() == '立即更新'
+    monkeypatch.setattr(help_ui, 'update_directory', lambda: tmp_path)
+    monkeypatch.setattr(help_ui.sys, 'frozen', True, raising=False)
+    callbacks = []
+    monkeypatch.setattr(h, '_task', lambda action, success: callbacks.append(success))
+    process = object()
+    app.documents.process = process
+    h._checked(SimpleNamespace(version='1.0.0', size=1024, notes='notes', sha256='a'*64))
+    try:
+        h.dialog.download_button.click()
+        assert len(callbacks) == 1 and not h.install_pending
+        callbacks[0](h.job / 'package.zip')
+        assert h.install_pending and app.documents.process is process
+        h.cancel_action()
+        assert h.dialog.download_button.isEnabled() and not h.install_pending
+        h.dialog.download_button.click()
+        h.cancel_action()
+        callbacks[-1](h.job / 'package.zip')
+        assert not h.install_pending and h.dialog.download_button.isEnabled()
+    finally:
+        app.documents.process = None
+        h.timer.stop()
 
 
 def test_cancel_update_wait_preserves_active_document_batch(controller):

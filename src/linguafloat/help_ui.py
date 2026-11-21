@@ -75,7 +75,7 @@ API Key 使用 Windows 凭据管理器或指定的环境变量，不放进软件
 不需要关闭安全软件。</p>
 <h3>更新</h3>
 <p>默认每天首次启动检查公开稳定版，可关闭。检查只访问 GitHub 发布信息，不上传文件、配置或密钥。
-下载由你确认；安装等待任务安全结束。更新失败会尝试回退，旧包和恢复记录会保留。</p>
+点击“立即更新”后下载并校验完整包，等待任务安全结束，再自动安装并重启。更新失败会尝试回退。</p>
 """
 
 
@@ -89,7 +89,6 @@ class HelpDialog(AppDialog):
     header_close_visible = False
     check_requested = Signal()
     download_requested = Signal()
-    install_requested = Signal()
     cancel_download_requested = Signal()
     auto_changed = Signal(bool)
     guide_closed = Signal()
@@ -127,17 +126,15 @@ class HelpDialog(AppDialog):
         actions = QHBoxLayout()
         self.check_button = QPushButton("检查更新")
         self.check_button.setObjectName("primary")
-        self.download_button = QPushButton("下载更新")
+        self.download_button = QPushButton("立即更新")
+        self.download_button.setToolTip("从 GitHub 下载并校验，等待任务结束后自动安装并重启")
         self.download_button.setEnabled(False)
-        self.install_button = QPushButton("安装并重启")
-        self.install_button.setEnabled(False)
         self.cancel_button = QPushButton("暂停下载")
         self.cancel_button.setEnabled(False)
         self.check_button.clicked.connect(self.check_requested)
         self.download_button.clicked.connect(self.download_requested)
-        self.install_button.clicked.connect(self.install_requested)
         self.cancel_button.clicked.connect(self.cancel_download_requested)
-        for button in (self.check_button, self.download_button, self.install_button, self.cancel_button):
+        for button in (self.check_button, self.download_button, self.cancel_button):
             actions.addWidget(button)
         body.addLayout(actions)
         self.tabs.addTab(updates, "软件更新")
@@ -209,7 +206,6 @@ class HelpController(QObject):
         self.timer.timeout.connect(self._try_install)
         self.dialog.check_requested.connect(lambda: self.check(manual=True))
         self.dialog.download_requested.connect(self.download)
-        self.dialog.install_requested.connect(self.install)
         self.dialog.cancel_download_requested.connect(self.cancel_action)
         self.dialog.auto_changed.connect(self._auto_changed)
         self.dialog.configure_requested.connect(self._configure)
@@ -231,7 +227,7 @@ class HelpController(QObject):
         self.dialog.cancel_button.setText("暂停下载")
         self.dialog.cancel_button.setEnabled(False)
         self.dialog.check_button.setEnabled(True)
-        self.dialog.install_button.setEnabled(True)
+        self.dialog.download_button.setEnabled(self.release is not None)
         self.dialog.status.setText("已取消安装等待；当前翻译任务继续运行。")
 
     def start(self):
@@ -273,7 +269,6 @@ class HelpController(QObject):
             return
         self.last_manual = time.monotonic()
         self.release = None
-        self.dialog.install_button.setEnabled(False)
         self.dialog.download_button.setEnabled(False)
         self.dialog.status.setText("正在检查公开稳定版……")
         self._task(lambda client, progress: check_latest(client, channel, __version__, update_directory() / "release-cache.json"), self._checked)
@@ -307,13 +302,16 @@ class HelpController(QObject):
             self.dialog.status.setText("当前已是最新稳定版。")
             self.dialog.notes.clear()
             return
-        self.dialog.status.setText(f"发现新版 v{release.version} · 完整包约 {release.size / 1024**2:.1f} MiB")
+        self.dialog.status.setText(f"v{__version__} → v{release.version} · {release.size / 1024**2:.1f} MiB。更新后将自动重启。")
         self.dialog.notes.setPlainText(release.notes)
         self.dialog.download_button.setEnabled(True)
         self.app.window.help_button.setText("帮助 · 有更新")
 
     def download(self):
-        if self.busy or self.release is None:
+        if self.busy or self.release is None or self.install_pending:
+            return
+        if not getattr(sys, "frozen", False):
+            self.dialog.status.setText("源码运行模式不能替换程序，请在完整便携版中更新。")
             return
         self.cancelled.clear()
         self.started = time.monotonic()
@@ -321,6 +319,9 @@ class HelpController(QObject):
         self.dialog.download_button.setEnabled(False)
         self.dialog.cancel_button.setEnabled(True)
         self.dialog.progress.show()
+        self.dialog.progress.setValue(0)
+        self.dialog.cancel_button.setText("暂停下载")
+        self.dialog.status.setText("正在从 GitHub 下载更新；校验通过且任务结束后将自动重启。")
         release = self.release
         self._task(lambda client, progress: download_release(client, release, self.job, progress, self.cancelled), self._downloaded)
 
@@ -330,22 +331,10 @@ class HelpController(QObject):
 
     def _downloaded(self, path):
         self.dialog.progress.setValue(1000)
-        self.dialog.status.setText("下载与校验完成。安装会等待当前任务安全结束，并保留旧版备份。")
-        self.dialog.install_button.setEnabled(True)
-
-    def install(self):
-        if not self.job or self.busy or self.install_pending:
-            return
-        if not getattr(sys, "frozen", False):
-            self.dialog.status.setText("源码运行模式不能替换程序，请在完整便携版中安装更新。")
-            return
-        if not self.app.window.confirm_discard():
-            return
-        if QMessageBox.question(self.dialog, "安装更新", "安装时会关闭并重启 LinguaFloat。正在运行的任务会继续完成；暂停中的任务需先继续或自行取消。是否等待并安装？",
-                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+        if self.cancelled.is_set():
+            self._failed("已暂停更新，未启动安装。")
             return
         self.install_pending = True
-        self.dialog.install_button.setEnabled(False)
         self.dialog.check_button.setEnabled(False)
         self.app._update_waiting = True
         self.app.documents.update_pending = True
@@ -353,7 +342,7 @@ class HelpController(QObject):
         self.app.window.documents.trial_button.setEnabled(False)
         self.dialog.cancel_button.setText("取消安装等待")
         self.dialog.cancel_button.setEnabled(True)
-        self.dialog.status.setText("等待当前任务安全结束；请结束持续区域翻译。关闭此窗口不取消等待。")
+        self.dialog.status.setText("校验通过，等待任务结束后安装并重启。暂停的任务请继续或取消，持续区域翻译请先结束。")
         self.timer.start()
         self._try_install()
 
@@ -365,6 +354,9 @@ class HelpController(QObject):
             return
         self.timer.stop()
         try:
+            if not self.app.window.confirm_discard():
+                self.cancel_action()
+                return
             target = Path(sys.executable).resolve().parent
             helper = target / "LinguaFloatUpdater.exe"
             if not helper.is_file():
@@ -386,9 +378,9 @@ class HelpController(QObject):
             self.install_pending = False
             self.app._update_waiting = False
             self.app.documents.update_pending = False
-            self.app.window.documents.set_busy(False)
+            self.app.window.documents.set_busy(self.app.window.documents.busy)
             self.dialog.check_button.setEnabled(True)
-            self.dialog.install_button.setEnabled(True)
+            self.dialog.download_button.setEnabled(True)
             self.dialog.status.setText(str(exc) if isinstance(exc, (UpdateError, OSError)) else "无法启动更新助手，当前程序未更改。")
             return
         self.app.quit(for_update=True)

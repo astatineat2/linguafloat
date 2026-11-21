@@ -21,6 +21,9 @@ REPOSITORY = "astatineat2/linguafloat-releases"
 
 
 def key_path():
+    override = os.environ.get('LINGUAFLOAT_SIGNING_KEY_FILE')
+    if override:
+        return Path(override)
     return Path(os.environ["LOCALAPPDATA"]) / "LinguaFloatPublisher" / "signing-key.pem"
 
 
@@ -28,6 +31,8 @@ def init_key():
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     path = key_path()
+    if not path.exists() and (ROOT / 'release/channel.json').exists():
+        raise SystemExit('已有受信更新公钥，不能因未找到原私钥而重新生成。请设置 LINGUAFLOAT_SIGNING_KEY_FILE 指向原文件。')
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         private = rsa.generate_private_key(public_exponent=65537, key_size=3072)
@@ -44,6 +49,9 @@ def init_key():
     private = serialization.load_pem_private_key(path.read_bytes(), password=None)
     numbers = private.public_key().public_numbers()
     public = {"n": format(numbers.n, "x"), "e": numbers.e}
+    existing = ROOT / 'release/channel.json'
+    if existing.exists() and json.loads(existing.read_text(encoding='utf-8'))['public_key'] != public:
+        raise SystemExit('该密钥不匹配现有公钥，未改写更新通道。')
     fingerprint = hashlib.sha256(json.dumps(public, sort_keys=True).encode()).hexdigest()[:16]
     atomic_json(ROOT / "release/channel.json", {"repository": REPOSITORY, "architecture": "win-x64",
                                                 "key_id": fingerprint, "public_key": public})
