@@ -2,9 +2,11 @@
 
 浮译是一个 Windows 桌面翻译工具。读英文论文时，可以把 PDF 做成左右对照：左边看原文，右边读中文，遇到不确定的术语就对着看。不需要翻整篇时，选中一句话就能译；游戏对话或图片里的字选不中，也可以在屏幕上框选。
 
-[下载 Windows x64 便携版（v0.19.9）](https://github.com/astatineat2/linguafloat-releases/releases/tag/v0.19.9) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [更新日志](CHANGELOG.md)
+[下载 Windows x64 稳定版](https://github.com/astatineat2/linguafloat-releases/releases/latest) · [使用指南](https://github.com/astatineat2/linguafloat-releases/blob/main/使用指南.md) · [更新日志](CHANGELOG.md)
 
 ## 翻出来是什么样
+
+v0.19.10 修复了盘符下一级独立文件夹的更新问题。v0.11.x 可用发布页提供的一次性 `LinguaFloat-Repair-v011.exe` 修复旧助手后原地升级。
 
 ![左右并排的同一段论文：左侧为英文小节，右侧为中文译文](docs/readme/reading.png)
 
@@ -20,7 +22,7 @@
 
 已有用户可以打开“帮助与更新”，检查并安装稳定版，无需重新解压。
 
-1. 在下载页选 `LinguaFloat-v0.19.9-win-x64.zip`，完整解压后打开 `LinguaFloat.exe`。不用装 Python，也别只把 EXE 单独拿出来。
+1. 在下载页选以 `win-x64.zip` 结尾的完整便携包，完整解压后打开 `LinguaFloat.exe`。不用装 Python，也别只把 EXE 单独拿出来。
 2. 在“配置设置”里填入自己的翻译服务和 API Key。屏幕文字识别在本机运行；要翻译的内容会发给你选的服务商，费用按对方的规则计算。
 3. 打开“文件翻译”，添加文档。第一次可以只填一两页试试，确认排版合适再翻整篇。除了 PDF，也支持 Word（DOCX）和 PowerPoint（PPTX）。
 

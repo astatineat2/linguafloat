@@ -358,9 +358,9 @@ class HelpController(QObject):
                 self.cancel_action()
                 return
             target = Path(sys.executable).resolve().parent
+            from linguafloat.update_install import check_portable_folder
+            check_portable_folder(target)
             helper = target / "LinguaFloatUpdater.exe"
-            if not helper.is_file():
-                raise UpdateError("更新助手缺失，请从发布页下载完整便携包。")
             cache = json.loads((update_directory() / "release-cache.json").read_text(encoding="utf-8"))
             payload, signature = base64.b64decode(cache["payload"]), cache["signature"].encode("ascii")
             release = parse_manifest(payload, signature, load_channel(), __version__)

@@ -16,6 +16,24 @@ from linguafloat.update_core import (UpdateError, atomic_json, check_archive, lo
                                     parse_manifest, update_directory)
 
 
+def check_target_path(target: Path) -> None:
+    if (not target.is_absolute() or target.parent == target or target.is_symlink()
+            or target.resolve() != target or target.name.casefold() == "linguafloat-backups"):
+        raise UpdateError(f"不能替换此安装目录：{target}。请从独立的 LinguaFloat 程序文件夹启动。")
+
+
+def check_portable_folder(target: Path) -> None:
+    check_target_path(target)
+    required = ("LinguaFloat.exe", "LinguaFloatUpdater.exe", "VERSION.txt", "document-runtime/python.exe",
+                "_internal/release/channel.json")
+    if not all((target / name).is_file() for name in required):
+        raise UpdateError(f"检测到的安装目录缺少便携版组件：{target}。请完整解压程序包。")
+    allowed = {name.split("/")[0].casefold() for name in required}
+    allowed.update({"help", "licenses", "license", "readme.md", "changelog.md", "third_party_notices.md"})
+    if any(entry.name.casefold() not in allowed for entry in target.iterdir()):
+        raise UpdateError(f"安装目录含非程序文件，未进行替换：{target}。请将完整便携包解压到单独的文件夹。")
+
+
 def load_request(directory: Path) -> dict:
     root = update_directory().resolve()
     directory = directory.resolve()
@@ -23,8 +41,7 @@ def load_request(directory: Path) -> dict:
         raise UpdateError("更新工作目录无效。")
     value = json.loads((directory / "request.json").read_text(encoding="utf-8"))
     target = Path(value["target"])
-    if not target.is_absolute() or target.is_symlink() or target.resolve() != target or len(target.parts) < 3:
-        raise UpdateError("程序安装目录无效。")
+    check_target_path(target)
     return value
 
 
@@ -181,6 +198,7 @@ def install(directory: Path, *, recover=False, launch=launch_application, health
             return
         if state.get("phase") not in (None, "prepared"):
             raise UpdateError("此更新已处理或需要恢复，不可重复安装。")
+        check_portable_folder(target)
         deadline = time.monotonic() + 180
         while process_alive(int(request["parent_pid"])):
             if time.monotonic() >= deadline:

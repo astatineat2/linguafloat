@@ -95,6 +95,13 @@ def publish(client):
         raise SystemExit("此候选版尚未完成公开发布前的材料或验证，未上传。")
     required = [f"LinguaFloat-v{__version__}-win-x64.zip", f"LinguaFloat-v{__version__}-corresponding-source.zip",
                 "update.json", "update.json.sig", "SHA256SUMS.txt"]
+    if review.get('legacy_repair'):
+        required[-1:-1] = ['LinguaFloat-Repair-v011.exe', 'LinguaFloat-Repair-v011.sha256', 'LinguaFloat-Repair-v011.sha256.sig']
+        from linguafloat.update_core import verify_signature, load_channel, sha256_file
+        attestation = (folder / required[-3]).read_bytes()
+        verify_signature(attestation, (folder / required[-2]).read_bytes(), load_channel()['public_key'])
+        if attestation != f'{sha256_file(folder / required[-4])}  {required[-4]}\n'.encode('ascii'):
+            raise SystemExit('一次性修复工具与发布者签名不匹配。')
     sys.path.insert(0, str(ROOT / "src"))
     from linguafloat.update_core import check_archive, load_channel, parse_manifest, sha256_file
     payload = (folder / "update.json").read_bytes()

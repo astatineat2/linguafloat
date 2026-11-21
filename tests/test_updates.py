@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import tempfile
 import threading
 import zipfile
 from pathlib import Path
@@ -172,6 +173,11 @@ def install_fixture(tmp_path, monkeypatch):
     target.mkdir()
     (target / "VERSION.txt").write_text("LinguaFloat v0.11.0\n")
     (target / "LinguaFloat.exe").write_text("old")
+    (target / "LinguaFloatUpdater.exe").write_text("old helper")
+    (target / "document-runtime").mkdir()
+    (target / "document-runtime/python.exe").touch()
+    (target / "_internal/release").mkdir(parents=True)
+    (target / "_internal/release/channel.json").write_text("{}")
     root = tmp_path / "updates"
     job = root / "transaction"
     job.mkdir(parents=True)
@@ -188,6 +194,41 @@ def install_fixture(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "data"))
     monkeypatch.setattr(installer, "launch_application", lambda *a: None)
     return target, job
+
+
+def test_drive_child_is_valid_for_install_and_restart_ack(tmp_path, monkeypatch):
+    import shutil
+    target, job = install_fixture(tmp_path, monkeypatch)
+    try:
+        scratch = tempfile.TemporaryDirectory(prefix="LinguaFloat 路径测试 ", dir=Path.cwd().anchor)
+    except PermissionError:
+        pytest.skip("needs a writable drive for a first-level portable directory")
+    with scratch as folder:
+        shallow = Path(folder).resolve()
+        shutil.copytree(target, shallow, dirs_exist_ok=True)
+        request = json.loads((job / "request.json").read_text())
+        core.atomic_json(job / "request.json", dict(request, target=str(shallow)))
+        assert Path(installer.load_request(job)["target"]) == shallow
+        installer.check_portable_folder(shallow)
+        installer.mark_healthy(job, "0.12.0", shallow)
+        assert installer.healthy(job, dict(request, version="0.12.0", target=str(shallow)))
+
+
+def test_mixed_folder_is_not_swapped(tmp_path, monkeypatch):
+    target, job = install_fixture(tmp_path, monkeypatch)
+    personal = target / "论文.pdf"
+    personal.write_bytes(b"keep")
+    with pytest.raises(core.UpdateError, match="非程序文件"):
+        installer.install(job)
+    assert personal.read_bytes() == b"keep"
+    assert not (job / "state.json").exists()
+
+
+def test_drive_root_is_not_an_install_folder(tmp_path, monkeypatch):
+    target, job = install_fixture(tmp_path, monkeypatch)
+    core.atomic_json(job / "request.json", {"target": target.anchor})
+    with pytest.raises(core.UpdateError):
+        installer.load_request(job)
 
 
 def test_complete_install_preserves_data_and_old_bundle(tmp_path, monkeypatch):
