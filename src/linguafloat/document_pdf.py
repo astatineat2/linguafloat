@@ -146,8 +146,8 @@ def has_scanned_text_layer(page):
     """Searchable scans have abundant invisible OCR text over a page-sized image."""
     import pymupdf as fitz
     area = page.rect.get_area()
-    if not area or not any((fitz.Rect(item["bbox"]) & page.rect).get_area() > area * .6
-                           for item in page.get_image_info()):
+    boxes = [fitz.Rect(item['bbox']) & page.rect for item in page.get_image_info()]
+    if not area or not boxes:
         return False
     total = hidden = 0
     for span in page.get_texttrace():
@@ -155,7 +155,25 @@ def has_scanned_text_layer(page):
         total += count
         if span.get("type") == 3 or span.get("opacity", 1) == 0:
             hidden += count
-    return total > 0 and hidden / total >= .8
+    if not total or hidden / total < .8:
+        return False
+    if any(box.get_area() > area * .6 for box in boxes):
+        return True
+    # Some scanners encode a sheet as full-width strips. Count their union,
+    # not the sum: overprinted duplicates must not turn a figure into a scan.
+    sheet = page.rect
+    for across, along in ((0,1),(1,0)):
+        strips = [b for b in boxes if b[across] <= sheet[across] + .1*(sheet[across+2]-sheet[across])
+                  and b[across+2] >= sheet[across+2] - .1*(sheet[across+2]-sheet[across])]
+        if len(strips) < 2:
+            continue
+        covered, end = 0., sheet[along]
+        for start, stop in sorted((b[along], b[along+2]) for b in strips):
+            covered += max(0., stop-max(start,end)); end=max(end,stop)
+        common = min(b[across+2] for b in strips)-max(b[across] for b in strips)
+        if covered*common > area*.6:
+            return True
+    return False
 
 
 def render_text_pdf(text, path, page_number):
@@ -228,7 +246,7 @@ def save_composed_pdf(document, target):
 def append_bilingual(dual, source, number, fragment, arrangement):
     """A fragment belongs to exactly one source page, including its continuations."""
     import pymupdf as fitz
-    from linguafloat.document_masthead import external_web_uri, restore_masthead_actions
+    from linguafloat.document_masthead import external_web_uri, printed_uri_buttons, restore_masthead_actions
     if arrangement == "alternating":
         start = len(dual)
         dual.insert_pdf(source, from_page=number, to_page=number)
@@ -258,7 +276,11 @@ def append_bilingual(dual, source, number, fragment, arrangement):
             # show_pdf_page copies drawing operators, not link annotations.
             # These panels use the native page size; external destinations stay exact.
             page = document[page_no]
-            for link in page.get_links():
+            links = page.get_links()
+            for button in printed_uri_buttons(page):
+                if not any(button['from'].intersects(link['from']) for link in links):
+                    links.append(button)
+            for link in links:
                 if uri := external_web_uri(page, link):
                     # get_links() already returns rotated page coordinates.
                     box = fitz.Rect(link["from"])
@@ -701,7 +723,7 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
     emit({"type": "measurement", "name": "原文布局保护索引", "seconds": active_clock(translator.control) - started})
     from linguafloat.document_artifacts import LayoutSnapshot
     snapshot = LayoutSnapshot(translator.store.path.parent, job, pages,
-                              policy_key="source-columns-v1-richtext-v4-quantity-v4-native-structure-v3-figure-protection-v2-context-v1-"+("scientific-v7" if policy.scientific.affected else "")+graphic_key+
+                              policy_key="source-columns-v1-richtext-v5-quantity-v4-native-structure-v3-figure-protection-v2-context-v1-"+("scientific-v7" if policy.scientific.affected else "")+graphic_key+
                               ("-bibliography-only-v4-"+hashlib.sha256(json.dumps(job.reference_boundary,sort_keys=True).encode()).hexdigest()
                                if job.skip_references else ""))
     settings = SettingsModel.model_validate({
@@ -909,6 +931,10 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
             emit({"type": "measurement", "name": "字体子集处理", "seconds": active_clock(translator.control) - started})
         return pdf
 
+    from babeldoc.format.pdf.document_il.backend import pdf_creater as cmap_backend
+    from linguafloat.document_fonts import keep_mapped_spaces
+    original_make_cmap = cmap_backend.make_tounicode
+    cmap_backend.make_tounicode = keep_mapped_spaces(original_make_cmap)
     PDFCreater.save_pdf_with_timeout = staticmethod(save)
     PDFCreater.subset_fonts_in_subprocess = staticmethod(subset)
     PDFCreater.render_paragraph_to_char = render
@@ -936,6 +962,7 @@ def _translate_layout_pdf(job, translator, output, emit, *, defer_graphics=False
         (output / "layout-report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
         return paths, list(dict.fromkeys(policy.warnings))
     finally:
+        cmap_backend.make_tounicode = original_make_cmap
         PDFCreater.save_pdf_with_timeout = staticmethod(original_save)
         PDFCreater.subset_fonts_in_subprocess = staticmethod(original_subset)
         PDFCreater.render_paragraph_to_char = original_render
@@ -1019,6 +1046,25 @@ def append_packed_continuations(fragment, rendered, number, indices, layout, con
         y += required
 
 
+def _proven_offpage_text(page, box, region):
+    """Only omit painting a real, fully off-sheet text run in native coordinates."""
+    import pymupdf as f
+    import math
+    if (region.get('kind') or region.get('stage') not in {'翻译','排版'} or region.get('coordinates')!='bottom-left'
+            or page.rotation or page.cropbox.tl!=f.Point(0,0) or box.is_empty or not all(map(math.isfinite,box))
+            or box.intersects(page.rect)):
+        return False
+    glyphs=[f.Rect(c[3]) for run in page.get_texttrace() for c in run['chars']
+            if not chr(c[0]).isspace() and f.Rect(c[3]).intersects(box)]
+    if not glyphs or any(g.intersects(page.rect) for g in glyphs):return False
+    bounds=f.Rect(glyphs[0]);
+    for g in glyphs[1:]:bounds|=g
+    # Layout boxes can include leading above the ink. Do not relax the
+    # off-sheet requirement or the left/right source glyph checks.
+    return (abs(box.x0-bounds.x0)<=1.5 and abs(box.x1-bounds.x1)<=1.5
+            and max(abs(box.y0-bounds.y0),abs(box.y1-bounds.y1))<=max(1.5,min(4,bounds.height*.32)))
+
+
 def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices, control, margin_references=None,
                         continuation_layout=None, retained_regions=None, enhance=None, emit=None, body_checkpoint=None):
     """Group each translated page and its continuations with the correct original."""
@@ -1094,6 +1140,7 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                 if regions:
                     from linguafloat.document_clip import prepare_text_redaction
                     prepare_text_redaction(fragment[0])
+                skipped_offpage=set()
                 for region in regions:
                     control.checkpoint()
                     original = source[number]
@@ -1102,6 +1149,11 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                         if is_replaced_identifier(original,region,publication[number]['contacts']):
                             continue
                     rect = fitz.Rect(region["box"]) * original.transformation_matrix * original.rotation_matrix
+                    if (fragment[0].rect==original.rect and not rect.intersects(original.rect)
+                            and _proven_offpage_text(original,rect,region)):
+                        region['display_scope']='outside-source-page'
+                        skipped_offpage.add(id(region))
+                        continue  # Keep the diagnostic and its coordinates; no drawable source area.
                     rect &= original.rect
                     if rect.is_empty or fragment[0].rect != original.rect:
                         raise DocumentError(f"[原文区域恢复失败] 原始第 {number + 1} 页，页面坐标或尺寸不一致。未发布不完整结果。")
@@ -1142,17 +1194,18 @@ def assemble_layout_pdf(job, pages, rendered_path, output, continuation_indices,
                 measured("参考文献原文恢复", started, number)
                 from linguafloat.document_publisher_footer import restore_publisher_footer
                 restore_publisher_footer(source[number], fragment[0])
+                # Inspect the actual content before adding diagnostic ink near adjacent fields.
+                from linguafloat.document_publisher_footer import restore_printed_urls
+                restore_printed_urls(source[number], fragment[0])
                 from linguafloat.document_failures import mark_pdf
                 progress(f"定位未翻译标记 · 第 {ordinal}/{len(pages)} 页", number)
                 started = active_clock(control)
-                mark_pdf(fragment[0], (retained_regions or {}).get(number, []), number, control=control)
+                mark_pdf(fragment[0], [r for r in regions if id(r) not in skipped_offpage], number, control=control)
                 measured("未翻译区域标记", started, number)
                 started = active_clock(control)
                 if number == 0 and masthead:
                     from linguafloat.document_masthead import restore_masthead_actions
                     restore_masthead_actions(fragment[0], masthead['links'])
-                from linguafloat.document_publisher_footer import restore_printed_urls
-                restore_printed_urls(source[number], fragment[0])
                 page_map.append(dict(source=number, start=len(mono), count=len(fragment), selected=True))
                 mono.insert_pdf(fragment)
                 if number == 0 and masthead:

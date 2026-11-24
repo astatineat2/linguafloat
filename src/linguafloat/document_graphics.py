@@ -1328,6 +1328,10 @@ class DocumentEnhancer:
         for index, record in enumerate(records, 1):
             record["id"] = f"P{source.number+1}-F{index}"
         self.records.extend(records)
+        if any(r.get('status')=='untranslated' for r in records):
+            # Leave adjacent contact fields visible when the marker chooses a blank label area.
+            from linguafloat.document_publisher_footer import restore_printed_urls
+            restore_printed_urls(source,target)
         mark([r for r in records if r.get("status") == "untranslated"])
         if graphics and self.analyzer:
             overrides=self.translator.job.graphic_overrides.get(self.digest,{})

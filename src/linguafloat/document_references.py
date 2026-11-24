@@ -37,6 +37,18 @@ def _digital_lines(page):
                        size=max((s["size"] for s in spans), default=0),
                        horizontal=line.get("dir", (1, 0)) == (1, 0),
                        bold=bool(spans) and all(s.get("flags", 0) & 16 for s in spans))
+            # Some digital pages encode each word as a line beginning with a
+            # microscopic space at the preceding word's endpoint. Check the
+            # visible word as well: a spacer alone must never bridge columns.
+            lead = line['spans'][0] if line['spans'] else None
+            if (rows and spans and row['horizontal'] and rows[-1]['horizontal'] and lead['text'] == ' '
+                    and lead['size'] <= .01 and abs(row['size'] - rows[-1]['size']) < .1):
+                prev = rows[-1]; x,y,x2,y2 = prev['box']; a,b,c,d = row['box']
+                if (abs(a-x2) <= .25 and abs(y-b) <= .25 and abs(y2-d) <= .25
+                        and -.25 <= spans[0]['bbox'][0]-x2 <= row['size']*.75):
+                    prev.update(text=prev['text']+row['text'], box=(x,min(y,b),max(x2,c),max(y2,d)),
+                                bold=prev['bold'] and row['bold'])
+                    continue
             # Some publishers put raised numbers on a shared baseline and do
             # not mark them as superscripts. Require a separate, smaller run.
             if len(spans) >= 2 and line.get("dir", (1, 0)) == (1, 0):
@@ -69,7 +81,35 @@ def _digital_lines(page):
                    box=(x0, min(y0, body["box"][1]), body["box"][2], max(y1, body["box"][3])),
                    bold=row["bold"] and body["bold"])
         consumed.add(id(body))
-    return [r for r in rows if id(r) not in consumed]
+    rows = [r for r in rows if id(r) not in consumed]
+    # Bare labels also occur in ordinary lists. Normalize diagnostic text only
+    # for consecutive author-led entries with a dated, hanging publication.
+    confirmed, candidates = set(), []
+    for idx, row in enumerate(rows):
+        match = re.match(r'^(\d{1,3})\s+(.*)', row['text'].strip())
+        if not (match and row['horizontal'] and (AUTHOR.match(match[2]) or re.fullmatch(r'[A-Z]\.',match[2]))):
+            continue
+        candidates.append((idx, row, int(match[1]), match[2]))
+        body = [match[2]]; x,y = row['box'][:2]; prev = y; size = row['size']
+        for part in rows[idx+1:idx+15]:
+            px,py = part['box'][:2]
+            if not (part['horizontal'] and 2 < px-x < size*4 and 0 < py-prev < size*2.3):
+                break
+            body.append(part['text']); prev = py
+        citation = ' '.join(body)
+        if len(body)>1 and _bibliographic_entry(citation):
+            confirmed.add(idx)
+    groups=[]
+    for item in candidates:
+        _,r,n,_ = item
+        if not groups or not (groups[-1][-1][2]+1==n and 0<r['box'][1]-groups[-1][-1][1]['box'][1]<r['size']*24
+                and abs(r['box'][0]-groups[-1][-1][1]['box'][0])<r['size']):
+            groups.append([])
+        groups[-1].append(item)
+    for group in groups:
+        if sum(idx in confirmed for idx,_,_,_ in group)>=2:
+            for _,r,num,text in group: r['text']=f'{num}. {text}'
+    return rows
 
 
 def _bibliographic_publication(text):
@@ -80,7 +120,7 @@ def _bibliographic_publication(text):
     # ACS and similar styles put a bare year before volume and pages/article ID.
     # A bare year or a URL alone must not turn an instruction into a citation.
     dated_publication = re.search(
-        r"\b[^\W\d_][\w. &'’:\-]*\s+(?:18|19|20)\d{2},\s*"
+        r"\b[^\W\d_][\w. &'’:\-]*(?:\s*\([A-Za-z. ]{1,24}\))?,?\s+(?:18|19|20)\d{2},\s*"
         r"\d{1,4}(?:\s*\(\d{1,3}\))?,\s*(?:No\.\s*)?[A-Za-z]*\d+\b", text)
     # IEEE places the bare year after explicitly labelled volume and pages.
     ieee_publication = re.search(
@@ -88,12 +128,40 @@ def _bibliographic_publication(text):
         r"(?:\s*,\s*no\.\s*\d+)?\s*,\s*pp?\.\s*\d+"
         r"(?:\s*[-\u2013\u2212]\s*\d+)?\s*,\s*(?:18|19|20)\d{2}[a-z]?"
         r"(?=[.,;\s]*(?:$|doi\b|https?://))", text, re.I)
-    return bool((year and publication) or dated_publication or ieee_publication)
+    # Elsevier-style volume (year) page range, sometimes with a supplement.
+    # Require a journal-like suffix, not just a year or an isolated number.
+    volume_year_pages = year and re.search(
+        r",\s*[A-Za-z][\w. &'’\-]{1,80}\s+\d{1,4}(?:\s+Suppl\.?(?:\s+\d+)?)?"
+        r"\s*\((?:18|19|20)\d{2}[a-z]?\)\s*[A-Za-z]?\d+(?:,\d{3})*\s*[-–−]\s*[A-Za-z]?\d+(?:,\d{3})*\b",text)
+    return bool((year and publication) or dated_publication or ieee_publication or volume_year_pages)
 
 
 def _bibliographic_entry(text):
     """Independent author, date and publication evidence, including Unicode names."""
     return bool(AUTHOR.match(text) and _bibliographic_publication(text))
+
+
+def _aligned_author_entries(lines):
+    # Flush-left and first-line-indent bibliographies do not satisfy the
+    # hanging-indent detector. Require repeated complete journal citations.
+    name = r"[^\W\d_][\w'’\-]+(?:\s+[^\W\d_][\w'’\-]+){0,2}?,?\s+[A-Z](?:\.|[A-Z]{0,3}(?=\s|,))"
+    author = re.compile(r'^'+name+r'.{0,75}?(?:,\s*|\s+&\s+|\s+and\s+)'+name)
+    journal = re.compile(r'\b[A-Z][A-Za-z. &]{1,65}\s+\d{1,4}\s*[:,]\s*(?:[A-Za-z]?\d+\s*[-–−]\s*\d+|[a-z]\d{3,}|\d{5,})\b')
+    starts=[i for i,r in enumerate(lines) if r.get('horizontal') and r.get('size',0)>0 and author.match(r['text'].strip())]
+    good=[]; consumed=set()
+    for i in starts:
+        if i in consumed:continue
+        row=lines[i]; group=[row]; size=row['size']; x=row['box'][0]
+        for r in lines[i+1:i+13]:
+            if (not r.get('horizontal') or abs(r.get('size',0)-size)>size*.25 or abs(r['box'][0]-x)>size*2.5
+                    or not -1<=r['box'][1]-group[-1]['box'][1]<=size*1.95):break
+            if author.match(r['text'].strip()) and abs(r['box'][0]-x)<2 and any(re.search(r'\(\d{4}[a-z]?\)',g['text']) for g in group):break
+            group.append(r)
+        text=re.sub(r'(?<=[a-z])-\n(?=[a-z])','','\n'.join(r['text'].strip() for r in group)).replace('\n',' ')
+        date=re.search(r'\((?:18|19|20)\d{2}[a-z]?\)',text)
+        if len(group)>=2 and date and journal.search(text[date.end():]):
+            good.append(row);consumed.update(range(i+1,i+len(group)))
+    return [r for r in good if sum(abs(r['box'][0]-s['box'][0])<=2 for s in good)>=2]
 
 
 def _author_year_citations(lines):
@@ -102,7 +170,7 @@ def _author_year_citations(lines):
     authors = [r for r in lines if r.get("horizontal") and r.get("size", 0) > 0
                and AUTHOR.match(r["text"].strip())]
     if not authors:
-        return []
+        return _aligned_author_entries(lines)
     left = min(r["box"][0] for r in authors)
     anchors = [r for r in authors if abs(r["box"][0] - left) <= 3]
     confirmed = []
@@ -119,7 +187,8 @@ def _author_year_citations(lines):
                 and any(r["box"][0] > left + max(3, anchor["size"] * .7) for r in rows[1:])
                 and _bibliographic_entry(" ".join(r["text"].strip() for r in rows))):
             confirmed.append(anchor)
-    return confirmed
+    if len(confirmed)>=2:return confirmed
+    return _aligned_author_entries(lines) or confirmed
 
 
 def _author_year_right_top(lines, split, left_anchors):
@@ -584,7 +653,19 @@ def _pdf_start(source, control, emit):
                                    or (r["box"][0] >= middle) == (line["box"][0] >= middle))]
             author_citations = _author_year_citations(following_rows) if not scanned else []
             numbered = numbered_evidence(subsequent)
-            if not numbered and len(author_citations) < 2:
+            joined_top=None
+            if (not scanned and not numbered and len(author_citations)<2 and line['box'][2]<middle
+                    and top>page.rect.height*.75):
+                tail=sorted(following_rows,key=lambda r:r['box'][1]); right=sorted((r for r in lines if r['box'][0]>=middle),key=lambda r:r['box'][1]); cites=_author_year_citations(right)
+                if tail and len(cites)>=2:
+                    first=tail[0]; prefix=[r for r in right if r['box'][1]<cites[0]['box'][1] and not r['text'].strip().isdigit()]; joined=' '.join(r['text'].strip() for r in prefix)
+                    if (len(tail)<=4 and len(prefix) in (1,2,3) and AUTHOR.match(first['text'].strip())
+                            and re.search(r'\((?:19|20)\d{2}\)',first['text']) and _bibliographic_entry(' '.join(r['text'] for r in tail)+' '+joined)
+                            and re.fullmatch(r'[A-Z][\w &.,\-]+,\s*\d+(?:\(\d+\))?,\s*\d+[e–\-]\d+\.?',joined)
+                            and all(r['horizontal'] and abs(r['size']-first['size'])<1 and r['box'][0]>cites[0]['box'][0]+3 for r in prefix)
+                            and all(0<=b['box'][1]-a['box'][1]<2*first['size'] for a,b in zip(prefix,prefix[1:]+[cites[0]]))):
+                        author_citations=[first];joined_top=prefix[0]['box'][1]
+            if not numbered and len(author_citations) < 2 and joined_top is None:
                 continue
             if numbered and (_section_text(line["text"]) != re.sub(r"\s+", " ", line["text"]).strip()
                              or any(re.match(r"\s*\(\d{1,3}\)", text) for text in subsequent)):
@@ -621,7 +702,7 @@ def _pdf_start(source, control, emit):
                 split = _reference_column_split(column_lines, page)
                 if split is None:
                     continue
-                right_top = _author_year_right_top(column_lines, split, author_citations)
+                right_top = joined_top if joined_top is not None else _author_year_right_top(column_lines, split, author_citations)
                 column = "both" if right_top is not None else "left"
                 boxes = [[0, top, split, page.rect.height]]
                 if right_top is not None:
@@ -789,6 +870,8 @@ def _reference_section_end(row, lines, page, split, scanned):
 def _reference_number(row):
     if row.get("citation_number") is not None:
         return row["citation_number"]
+    if re.match(r'^\s*10\.\d{4,9}/\S',row['text']):
+        return None  # A DOI wrapped onto its own line, not item number 10.
     match = NUMBER.match(row["text"])
     return int(next(g for g in match.groups() if g)) if match else None
 
@@ -830,7 +913,7 @@ def _join_numbered_publication_lines(lines, split):
     return result
 
 
-def _reference_continues(lines, last_number, split=None, *, author_year=False):
+def _reference_continues(lines, last_number, split=None, *, author_year=False, page=None):
     numbers = [n for row in lines if (n := _reference_number(row)) is not None]
     # Wrapped DOI suffixes such as "10.1016/..." are not numbered entries in
     # an independently confirmed author-year bibliography.
@@ -840,7 +923,21 @@ def _reference_continues(lines, last_number, split=None, *, author_year=False):
             return False
         texts = [f"[{r['citation_number']}] {r['citation_text']}" if r.get("citation_number") is not None
                  else r["text"] for r in lines]
-        return _numbered_citation_evidence(texts, numbers[0], min(2, len(numbers)))
+        if _numbered_citation_evidence(texts, numbers[0], min(2, len(numbers))):
+            return True
+        # A linked institutional publication need not have a personal author or
+        # journal date. Confirm its printed destination and the next two papers.
+        if page is None or len(numbers) < 3:
+            return False
+        import pymupdf as fitz
+        starts = [i for i, row in enumerate(lines) if _reference_number(row) is not None]
+        first = lines[starts[0]:starts[1]]
+        if not _numbered_citation_evidence(texts[starts[1]:], numbers[1], 2):
+            return False
+        printed = ''.join(re.sub(r'\s+', '', r['text']) for r in first).rstrip('.,;')
+        return any(link.get('kind') == fitz.LINK_URI and (uri := link.get('uri', '')).startswith(('https://', 'http://'))
+                   and printed.endswith(uri) and any(fitz.Rect(r['box']).intersects(link['from']) and
+                   uri.startswith(r['text'].strip()) for r in first if r['text'].strip()) for link in page.get_links())
     columns = [lines] if split is None else [[r for r in lines if r["box"][0] < split],
                                             [r for r in lines if r["box"][0] >= split]]
     return all(len(_author_year_citations(column)) >= 2 for column in columns)
@@ -882,7 +979,8 @@ def pdf_boundary(source, control, emit):
                    and any(b[0] <= r["box"][0] < b[2] and b[1] <= r["box"][1] < b[3] for b in boxes)]
         end = endings[0] if endings else None
         if number > boundary["page"] and not end and not _reference_continues(
-                lines, last_number, split, author_year=boundary.get("evidence") == "headed-author-year-citations"):
+                lines, last_number, split, author_year=boundary.get("evidence") == "headed-author-year-citations",
+                page=None if scanned else page):
             boundary["uncertain_end"] = dict(page=number, reason="unconfirmed-reference-continuation")
             emit({"type": "progress", "stage": "解析中", "value": None,
                   "message": f"第 {number + 1} 页未确认参考文献续页，不将后续正文自动纳入保护范围。"})

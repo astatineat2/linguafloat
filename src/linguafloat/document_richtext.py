@@ -223,7 +223,8 @@ def styled_translate_input(engine, paragraph, original, *args, **kwargs):
             placeholders.append(item)
             tokens.append(item.placeholder)
             next_id = item.id + 1
-        elif part.pdf_same_style_characters and _style_key(part.pdf_same_style_characters.pdf_style) != _style_key(paragraph.pdf_style):
+        elif (part.pdf_same_style_characters and _style_key(part.pdf_same_style_characters.pdf_style) != _style_key(paragraph.pdf_style)
+              and any(c.char_unicode != ' ' for c in part.pdf_same_style_characters.pdf_character)):
             item = engine.process_composition(part.pdf_same_style_characters, next_id, paragraph)
             placeholders.append(item)
             tokens.extend([item.left_placeholder, *item.composition.pdf_character, item.right_placeholder])

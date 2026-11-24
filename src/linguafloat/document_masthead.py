@@ -3,6 +3,33 @@ from statistics import median
 import re
 
 
+def printed_uri_buttons(page):
+    """Expose passive web actions only, never copy a form or execute its actions."""
+    import pymupdf as f
+    from urllib.parse import urlsplit
+
+    for widget in page.widgets(types=(f.PDF_WIDGET_TYPE_BUTTON,)):
+        doc, x = page.parent, widget.xref
+        kind, flags = doc.xref_get_key(x,'F')
+        if kind=='int' and int(flags) & (1|2|32):
+            continue
+        if (not widget.field_flags & 65536 or doc.xref_get_key(x, 'A/S') != ('name', '/URI')
+                or any(doc.xref_get_key(x, key)[0] != 'null' for key in ('AA', 'A/Next'))):
+            continue
+        kind, value = doc.xref_get_key(x, 'A/URI')
+        if kind != 'string' or not value.startswith(('http://', 'https://')) or any(c.isspace() for c in value):
+            continue
+        try:
+            parts = urlsplit(value)
+            if not parts.hostname or parts.username is not None:
+                continue
+        except ValueError:
+            continue
+        box = widget.rect * page.rotation_matrix
+        if not box.is_empty and page.rect.contains(box):
+            yield {'kind': f.LINK_URI, 'from': box, 'uri': value}
+
+
 def external_web_uri(page, link):
     import pymupdf as f
 
@@ -33,6 +60,21 @@ def restore_masthead_actions(page, links):
             page.parent.xref_set_key(xref, 'A', f"<</S/URI/URI{f.get_pdf_str(link['uri'])}>>")
         elif not matches:
             page.insert_link(dict(kind=f.LINK_URI, uri=link['uri'], **{'from': box}))
+
+
+def _printed_anchor(source, glyphs):
+    # get_texttrace contains painted glyphs; text extraction may infer spaces
+    # between them. Recover only a unique complete label from the printed row.
+    positions = [i for i,c in enumerate(source) if not c.isspace()]
+    compact = ''.join(source[i] for i in positions)
+    needle = ''.join(glyphs.split())
+    if not needle or compact.count(needle)!=1:
+        return None
+    pos=compact.index(needle); start=positions[pos]; end=positions[pos+len(needle)-1]+1
+    if ((start and source[start-1].isalnum() and source[start].isalnum()) or
+            (end<len(source) and source[end-1].isalnum() and source[end].isalnum())):
+        return None
+    return source[start:end]
 
 
 def plan_masthead(page):
@@ -74,7 +116,7 @@ def plan_masthead(page):
             continue
         for index in (0, 2):
             row = rows[index]
-            hits = [(box, uri) for box, uri in links if (box & row['box']).get_area() >= box.get_area()*.85]
+            hits = [(box, uri) for box, uri in links if not box.is_empty and (box & row['box']).get_area() >= box.get_area()*.85]
             if len(hits) != 1:
                 break
             box, uri = hits[0]
@@ -83,7 +125,8 @@ def plan_masthead(page):
                      if box.contains((f.Rect(c[3]).tl+f.Rect(c[3]).br)/2)]
             text = ''.join(chr(c[0]) for c in chars).strip()
             source = ''.join(s['text'] for s in row['spans']).strip()
-            if not text or source.count(text) != 1 or source == text:
+            text = _printed_anchor(source, text)
+            if not text or source == text:
                 break
             color = min(row['spans'], key=lambda s: abs(s['bbox'][0]-box.x0))['color']
             row.update(anchor=text, uri=uri, color=f.sRGB_to_pdf(color))

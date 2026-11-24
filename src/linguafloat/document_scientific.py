@@ -263,7 +263,11 @@ def protect_math(paragraph, fonts):
         cursor += length
     base_size = paragraph.pdf_style.font_size if paragraph.pdf_style else 0
     for c in chars:
-        if c.pdf_style and base_size and c.pdf_style.font_size < base_size * .8:
+        # Some publishers paint a microscopic ASCII space between every word.
+        # Its size alone is not evidence of a subscript. Existing formula runs
+        # (including their internal spaces) are not part of this pass.
+        if (c.pdf_style and base_size and c.pdf_style.font_size < base_size * .8
+                and c.char_unicode != ' '):
             protected.add(id(c))
     if not protected:
         paragraph.pdf_paragraph_composition = merge_formula_runs(compositions, base_size)

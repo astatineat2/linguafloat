@@ -13,6 +13,27 @@ from collections import defaultdict
 from linguafloat.document_core import DocumentError
 
 
+def keep_email_units_together(units):
+    # The engine treats @ and dots as break points. Its look-ahead must
+    # measure the complete address before placing the first character.
+    chars = [u.try_get_unicode() for u in units]
+    text = ''.join(c if c and len(c) == 1 else '\ufffc' for c in chars)
+    addresses = []
+    for m in re.finditer(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', text, re.ASCII):
+        addresses.append(m[0])
+        for unit in units[m.start():m.end()]:
+            unit.can_break_line_cache = False
+    return addresses
+
+
+def emails_fit_lines(placed, addresses):
+    from itertools import groupby
+    lines = [''.join(u.try_get_unicode() or '\ufffc' for u in group)
+             for _, group in groupby(placed, key=lambda u: round(u._lf_line_y, 2))]
+    return all(sum(line.count(address) for line in lines) >= addresses.count(address)
+               for address in set(addresses))
+
+
 def bounds(value):
     box = getattr(value, "box", value)
     if box is None or any(getattr(box, k, None) is None for k in ("x", "y", "x2", "y2")):
@@ -64,6 +85,38 @@ def _copy_passthrough_instruction(instruction, memo):
     return value
 
 
+def split_numbered_rows(paragraph, words):
+    """Recover separate source rows only for an exact sequence of styled text runs."""
+    parts=paragraph.pdf_paragraph_composition
+    if not paragraph.box or not parts or not all(c.pdf_same_style_unicode_characters for c in parts):return []
+    strings=[c.pdf_same_style_unicode_characters.unicode or '' for c in parts]
+    text=''.join(strings)
+    if not re.match(r'^\s*1[.)、]',text):return []
+    marks=list(re.finditer(r'(?<![\w.])([1-9]\d?)[.)、](?!\d)',text))
+    nums=[int(m[1]) for m in marks]
+    if len(nums)<3 or nums!=list(range(1,len(nums)+1)):return []
+    x,y,x2,y2=bounds(paragraph)
+    anchors=sorted([(int(s[:-1]),b) for s,b in words if re.fullmatch(r'[1-9]\d?[.)]',s)
+                    and abs(b[0]-x)<3 and y-1<(b[1]+b[3])/2<y2+1],key=lambda item:-item[1][3])
+    if [n for n,_ in anchors]!=nums:return []
+    from babeldoc.format.pdf.document_il import Box
+    out=[]
+    for i,(m,(_,b)) in enumerate(zip(marks,anchors)):
+        end=marks[i+1].start() if i+1<len(marks) else len(text)
+        top=y2 if i==0 else (anchors[i-1][1][1]+b[3])/2
+        bottom=y if i+1==len(anchors) else (b[1]+anchors[i+1][1][3])/2
+        if bottom>=top:return []
+        row=copy.copy(paragraph);row.box=Box(x,bottom,x2,top);row.first_line_indent=False
+        row.unicode=text[m.start():end];row.pdf_paragraph_composition=[];pos=0
+        for part,string in zip(parts,strings):
+            lo=max(0,m.start()-pos);hi=min(len(string),end-pos);pos+=len(string)
+            if lo<hi:
+                piece=copy.copy(part);run=copy.copy(piece.pdf_same_style_unicode_characters)
+                run.unicode=string[lo:hi];piece.pdf_same_style_unicode_characters=run;row.pdf_paragraph_composition.append(piece)
+        out.append(row)
+    return out
+
+
 class LayoutPolicy:
     def __init__(self, control, source=None, pages=None, translator=None):
         self.control = control
@@ -74,6 +127,7 @@ class LayoutPolicy:
         self.warnings = []
         self.records = []
         self.geometry_repairs = []
+        self.row_order_offsets = {}
         self.retained_regions = defaultdict(list)
         self.original_boxes = {}
         self.prepared = set()
@@ -199,6 +253,17 @@ class LayoutPolicy:
                 self.geometry_repairs.append(dict(page=page.page_number+1, kind='cjk_boundary_spaces', runs=changed))
         page.pdf_paragraph[:] = [p for p in page.pdf_paragraph if id(p) not in self.failed_paragraphs]
         self.exclude_frontmatter(page)
+        for paragraph in list(page.pdf_paragraph):
+            replacement=split_numbered_rows(paragraph,self.source_words.get(page.page_number,()))
+            if replacement:
+                index=page.pdf_paragraph.index(paragraph)
+                page.pdf_paragraph[index:index+1]=replacement
+                offset=0
+                for row in replacement:
+                    self.row_order_offsets[id(row)]=offset
+                    self.paragraph_pages[id(row)]=page
+                    offset+=len(row.unicode)+1
+                self.geometry_repairs.append(dict(page=page.page_number+1,kind='numbered_rows',count=len(replacement)))
         from babeldoc.format.pdf.document_il import Box
         from linguafloat.document_scientific import repair_cached_chemical_scripts
         from linguafloat.document_geometry import join_fragmented_paragraphs, attach_formula_rules, preserve_symbol_labels, restore_reference_styles
@@ -382,6 +447,7 @@ class LayoutPolicy:
         if not paragraph.box:
             raise DocumentError(f"[PDF 段落缺少坐标] 原始第 {page.page_number + 1} 页，无法安全排版。")
         units = self.normalize_dropcap(units, paragraph, page) if apply_layout else units
+        addresses = keep_email_units_together(units) if '@' in (paragraph.unicode or '') else []
         original = self.original_boxes.get(id(paragraph), paragraph.box)
         obstacles = self.obstacles(page, paragraph)
         boxes = list(expanded_boxes(original, obstacles, bounds(page.cropbox)))
@@ -408,6 +474,8 @@ class LayoutPolicy:
                 for spacing in spacings:
                     placed, fits = engine._layout_typesetting_units(units, box, scale, spacing, paragraph, use_english_line_break)
                     if not fits or not placed:
+                        continue
+                    if addresses and not emails_fit_lines(placed, addresses):
                         continue
                     from linguafloat.document_geometry import space_formula_lines
                     placed, fits = space_formula_lines(placed, box, size*scale)
@@ -886,7 +954,15 @@ class LayoutPolicy:
                 return
             curves, forms = len(page.pdf_curve), len(page.pdf_form)
             try:
-                return policy._saved["typeset_paragraph"](engine, paragraph, page, *args, **kwargs)
+                result=policy._saved["typeset_paragraph"](engine, paragraph, page, *args, **kwargs)
+                # Sibling rows share their parent's paint order. Without unique
+                # suborders the PDF writer interleaves their first glyphs, then their seconds.
+                offset=policy.row_order_offsets.get(id(paragraph),0)
+                if offset:
+                    for part in paragraph.pdf_paragraph_composition:
+                        if part.pdf_character and part.pdf_character.sub_render_order is not None:
+                            part.pdf_character.sub_render_order+=offset
+                return result
             except Exception as error:
                 del page.pdf_curve[curves:]
                 del page.pdf_form[forms:]

@@ -1,4 +1,5 @@
 """Clip source artwork without importing a second copy of the surrounding prose."""
+import re
 import pymupdf as f
 
 
@@ -76,9 +77,49 @@ def prepare_text_redaction(page, *, strict=False):
     return True
 
 
+_SPACING_SPAN = re.compile(rb'/Span\s*<<\s*/ActualText\s*<(?i:FEFF(?:200[0-AB]|202F|0020|00A0)+)>\s*>>\s*BDC\Z')
+_TEXT_STATE = {b'BT', b'ET', b'Tf', b'Tm', b'Td', b'TD', b'T*', b'Tc', b'Tw', b'Tz', b'TL', b'Tr', b'Ts'}
+
+
+def _strip_orphan_spacing(data):
+    if b'/ActualText' not in data:
+        return data
+    m = f.mupdf
+    stream = m.fz_open_buffer(m.fz_new_buffer_from_copied_data(data))
+    token = m.PdfLexbuf(256)
+    edits = []
+    previous = 0
+    pending = None
+    while (kind := m.pdf_lex(stream, token)) != m.PDF_TOK_EOF:
+        if kind == m.PDF_TOK_ERROR:
+            return data
+        if kind != m.PDF_TOK_KEYWORD:
+            continue
+        end = stream.fz_tell()
+        op = data[end-token.m_internal.len:end]
+        if op == b'BI':  # Never interpret inline image bytes as operators.
+            return data
+        if op == b'BDC':
+            match = _SPACING_SPAN.search(data, previous, end)
+            pending = match.span() if match else None
+        elif op == b'EMC' and pending is not None:
+            edits.append(pending)
+            pending = None
+        elif op not in _TEXT_STATE:
+            pending = None
+        previous = end
+    if not edits:
+        return data
+    chunks, start = [], 0
+    for begin, end in edits:
+        chunks.extend((data[start:begin], b'/Span BMC '))
+        start = end
+    return b''.join([*chunks, data[start:]])
+
+
 def show_source_region(target, rect, source, index, *, clip=None, rotate=0):
     keep = rect if clip is None else clip
-    for retry in (False, True):
+    for retry in (0, 1, 2):
         with f.open() as local:
             local.insert_pdf(source, from_page=index, to_page=index, links=False, annots=False)
             page = local[0]
@@ -87,8 +128,31 @@ def show_source_region(target, rect, source, index, *, clip=None, rotate=0):
             expected = _glyphs(page, keep)
             if retry:
                 prepare_text_redaction(page)
-            clip_text(page, keep)
-            if _same_glyphs(expected, _glyphs(page, keep)):
+            # Keep redaction away from a neighboring ligature's text state.
+            # The displayed clip is unchanged. Verify the resulting standalone
+            # panel too, so invisible neighboring text is not imported.
+            margin=min(3.,keep.height/3) if retry==2 else 0.
+            clip_text(page,(keep+(-margin,-margin,margin,margin)) & page.rect)
+            actual = _glyphs(page, keep)
+            if not _same_glyphs(expected, actual):
+                # Redaction may leave an empty marked span attached to the last
+                # surviving glyph. Keep all text-state operators and live spans.
+                for xref in set(page.get_contents()) | {x[0] for x in page.get_xobjects()}:
+                    data = local.xref_stream(xref)
+                    fixed = _strip_orphan_spacing(data)
+                    if fixed != data:
+                        local.update_stream(xref, fixed)
+                actual = _glyphs(page, keep)
+            if _same_glyphs(expected, actual):
+                if margin:
+                    with f.open() as check:
+                        p=check.new_page(width=page.rect.width,height=page.rect.height)
+                        p.show_pdf_page(keep,local,0,clip=keep)
+                        src=source[index];opt=dict(clip=keep,matrix=f.Matrix(2,2),annots=False)
+                        if (src.rotation or p.get_text().split()!=src.get_text(clip=keep).split()
+                                or src.get_pixmap(**opt).samples!=p.get_pixmap(**opt).samples):
+                            continue
                 target.show_pdf_page(rect, local, 0, clip=keep, rotate=rotate)
                 return
-    raise ValueError('Source clipping changed retained glyphs; region was not committed')
+    from linguafloat.document_core import DocumentError
+    raise DocumentError(f'[原文区域恢复失败] 原始第 {index + 1} 页：裁切后的复制文字或字形坐标与原文不一致，未发布不完整结果。')
