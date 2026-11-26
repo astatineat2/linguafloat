@@ -34,17 +34,19 @@ def diagnostic(error, stage):
                   f"{stage}发生 {type(error).__name__}，已保留原文；代码位置见问题日志")
     specifics = ("片段译文不是文字", "片段返回空译文", "片段夹带公式标记",
                  "片段格式标签丢失、增加或顺序变化", "片段格式标签丢失、增加或嵌套关系变化", "片段小数、百分比或数量级发生变化",
-                 "片段正文数值发生变化",
+                 "片段正文数值发生变化", "构型前缀后误接了编号而非酶名", "跨公式重组后遗漏了晶体结构主语", "片段中的科学缩写缺失", "比较分句中显著升高的限定或方向缺失", "片段末尾括号内的科学缩写错位",
                  "补译响应不是有效 JSON", "片段数量不匹配", "片段编号缺失、重复或不匹配",
                  "单片段补译未返回纯文本")
     reason += next(("：" + value for value in specifics if value in str(error)), "")
+    if isinstance(error, DocumentError) and getattr(error, 'fragment_evidence', ''):
+        reason += '；' + error.fragment_evidence
     return dict(stage=stage, error_type=type(error).__name__, reason=reason,
-                retry_result=("当前重试额度已用尽；已停止补译" if "当前重试额度已用尽" in str(error)
+                retry_result=("内容纠错额度已用尽；已停止补译" if "内容纠错额度已用尽" in str(error) else "当前重试额度已用尽；已停止补译" if "当前重试额度已用尽" in str(error)
                               else "保留原文未追加请求；已有尝试见任务请求记录"),
                 fallback="保留原文", trace=failure_trace(error))
 
 
-def mark_pdf(page, regions, page_number, control=None):
+def mark_pdf(page, regions, page_number, control=None, *, text_boxes=()):
     """Draw in unrotated PDF coordinates, restoring the display rotation."""
     if control:
         control.checkpoint()
@@ -52,13 +54,13 @@ def mark_pdf(page, regions, page_number, control=None):
     try:
         if rotation:
             page.set_rotation(0)
-        return _mark_unrotated_pdf(page, regions, page_number, control)
+        return _mark_unrotated_pdf(page, regions, page_number, control, text_boxes)
     finally:
         if rotation:
             page.set_rotation(rotation)
 
 
-def _mark_unrotated_pdf(page, regions, page_number, control=None):
+def _mark_unrotated_pdf(page, regions, page_number, control=None, text_boxes=()):
     """Inspect one immutable page snapshot; track subsequent paint separately.
 
     Rebuilding a display list for every margin candidate is very expensive on
@@ -72,7 +74,8 @@ def _mark_unrotated_pdf(page, regions, page_number, control=None):
     display = page.get_displaylist(annots=True)
     if control:
         control.checkpoint()
-    occupied = []
+    # Interline whitespace still belongs to the translated paragraph when copied.
+    occupied = [fitz.Rect(box)+(-1,-1,1,1) for box in text_boxes]
     for region in active:
         box = fitz.Rect(region["box"])
         if region.get("coordinates", "bottom-left") == "bottom-left":

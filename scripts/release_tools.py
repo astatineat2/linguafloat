@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata as metadata
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -73,19 +74,24 @@ def write_source(output: Path):
     inputs = [(ROOT / "src", "src"), (ROOT / "tests", "tests"), (ROOT / "photo", "photo"), (ROOT / "release", "release"),
               (ROOT / "LICENSES", "LICENSES"), (ROOT / "docs/public", "docs/public"),
               (ROOT / "source-materials", "source-materials")]
-    fixed = ["pyproject.toml", "LinguaFloat.spec", "LinguaFloatUpdater.spec", "LICENSE", "THIRD_PARTY_NOTICES.md",
+    fixed = ["pyproject.toml", "LinguaFloat.spec", "LinguaFloatUpdater.spec", "LICENSE", "THIRD_PARTY_NOTICES.md", "CHANGELOG.md",
              "app-requirements.lock.txt", "document-requirements.lock.txt"]
     build_scripts = ["build_documents.ps1", "build.ps1", "check_build.py", "prepare_document_runtime.py",
                      "prepare_assets.py", "document_worker_entry.py", "updater_entry.py", "collect_licenses.py",
                      "publish_portable.py", "release_tools.py", "github_publish.py", "complete_release_sources.py",
                      "finalize_release_inventory.py", "build_distribution.py", "build_installer.ps1"]
+    committed = set(subprocess.check_output(
+        ["git", "ls-tree", "-r", "-z", "--name-only", "HEAD"], cwd=ROOT
+    ).decode("utf-8").split("\0"))
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         archive.writestr("SOURCE-REVISION.txt", "LinguaFloat v" + __version__ + "\n" +
                          subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() + "\n")
         for source, label in inputs:
             for path in sorted(source.rglob("*")):
-                if path.is_file() and "__pycache__" not in path.parts and path.suffix.lower() not in {".pyc", ".pem", ".key", ".part"}:
-                    archive.write(path, str(Path(label) / path.relative_to(source)))
+                relative = (Path(label) / path.relative_to(source)).as_posix()
+                if (relative in committed and path.is_file() and "__pycache__" not in path.parts
+                        and path.suffix.lower() not in {".pyc", ".pem", ".key", ".part"}):
+                    archive.write(path, relative)
         for name in fixed:
             archive.write(ROOT / name, name)
         for name in build_scripts:
@@ -95,12 +101,16 @@ def write_source(output: Path):
         archive.write(ROOT / "docs/public/开发与构建.md", "README.md")
 
 
-def prepare(bundle: Path, *, candidate=False):
-    bundle = bundle.resolve()
-    if (bundle / "VERSION.txt").read_text(encoding="utf-8").splitlines()[0] != f"LinguaFloat v{__version__}":
-        raise SystemExit("The bundle version must match the source version.")
-    if not (bundle / "LinguaFloatUpdater.exe").is_file():
-        raise SystemExit("Complete update assistant is missing.")
+def prepare(distribution: Path, *, candidate=False):
+    distribution = distribution.resolve()
+    name = f'LinguaFloat-v{__version__}-windows-x64-Setup.exe'
+    setup = distribution / name
+    summary = json.loads((distribution / 'build-summary.json').read_text(encoding='utf-8'))
+    if summary.get('format') != 'setup' or summary['version'] != __version__:
+        raise SystemExit('Expected a matching Setup distribution.')
+    sums = dict(line.split('  ', 1)[::-1] for line in (distribution / 'SHA256SUMS.txt').read_text().splitlines())
+    if sha256_file(setup) != sums.get(name):
+        raise SystemExit('Setup differs from the compiled installer.')
     approvals_path = ROOT / "release/approvals.json"
     approvals = json.loads(approvals_path.read_text(encoding="utf-8")) if approvals_path.exists() else {}
     required = ("artwork_redistribution", "license_inventory_reviewed", "corresponding_source_complete", "isolated_profile_verified")
@@ -110,36 +120,30 @@ def prepare(bundle: Path, *, candidate=False):
     output = ROOT / "release-assets" / ("v" + __version__)
     output.mkdir(parents=True, exist_ok=True)
     # Never silently replace an immutable release asset.
-    package = output / f"LinguaFloat-v{__version__}-win-x64.zip"
+    package = output / name
     if package.exists():
         raise SystemExit("Release archive already exists. Review/remove the local candidate explicitly or increment the version.")
-    total = 0
-    with zipfile.ZipFile(package, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        for path in sorted(bundle.rglob("*")):
-            if path.is_symlink():
-                raise SystemExit("A portable bundle must not contain symbolic links.")
-            if path.is_file():
-                archive.write(path, path.relative_to(bundle).as_posix())
-                total += path.stat().st_size
+    shutil.copyfile(setup, package)
+    total = summary['payload_bytes']
     source = output / f"LinguaFloat-v{__version__}-corresponding-source.zip"
     write_source(source)
     notes = (ROOT / "docs/public/本版更新.md").read_text(encoding="utf-8")
-    value = {"schema": 1, "version": __version__, "minimum_updater": "0.11.0", "architecture": "win-x64",
+    value = {"schema": 2, "version": __version__, "minimum_updater": "0.20.0", "architecture": "win-x64",
              "repository": REPOSITORY, "url": f"https://github.com/{REPOSITORY}/releases/download/v{__version__}/{package.name}",
              "page": f"https://github.com/{REPOSITORY}/releases/tag/v{__version__}", "size": package.stat().st_size,
              "unpacked_size": total, "sha256": sha256_file(package), "notes": notes,
-             "candidate_only": bool(missing)}
+             "candidate_only": candidate or bool(missing)}
     payload = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
     (output / "update.json").write_bytes(payload)
     (output / "update.json.sig").write_bytes(sign(payload))
     assets = [package, source, output / "update.json", output / "update.json.sig"]
     (output / "SHA256SUMS.txt").write_text("".join(sha256_file(p) + "  " + p.name + "\n" for p in assets), encoding="ascii")
-    atomic_json(output / "LOCAL-RELEASE-REVIEW.json", {"public_release_ready": not missing,
+    atomic_json(output / "LOCAL-RELEASE-REVIEW.json", {"public_release_ready": not candidate and not missing,
                 "missing": missing, "version": __version__, "source_repository": "astatineat2/linguafloat",
                 "public_repository": REPOSITORY,
                 "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()})
-    print(json.dumps({"output": str(output), "zip_MiB": round(package.stat().st_size / 1024**2, 1),
-                      "unpacked_bytes": total, "public_release_ready": not missing, "missing": missing}, ensure_ascii=False))
+    print(json.dumps({"output": str(output), "setup_MiB": round(package.stat().st_size / 1024**2, 1),
+                      "unpacked_bytes": total, "public_release_ready": not candidate and not missing, "missing": missing}, ensure_ascii=False))
 
 
 def main():
@@ -147,13 +151,13 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-key")
     pack = sub.add_parser("prepare")
-    pack.add_argument("--bundle", type=Path, default=ROOT / "exe")
+    pack.add_argument("--distribution", type=Path, required=True)
     pack.add_argument("--candidate", action="store_true", help="Prepare locally; do not represent incomplete licensing/QA as public-ready.")
     args = parser.parse_args()
     if args.command == "init-key":
         init_key()
     else:
-        prepare(args.bundle, candidate=args.candidate)
+        prepare(args.distribution, candidate=args.candidate)
 
 
 if __name__ == "__main__":

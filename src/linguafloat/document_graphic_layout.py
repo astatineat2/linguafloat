@@ -1,6 +1,7 @@
 """Geometry shared by table cells and chart labels, without interpreting data."""
 from __future__ import annotations
 
+import re
 from statistics import median
 
 
@@ -301,6 +302,26 @@ def native_table_regions(page):
             continue
         result.append(dict(kind='table', box=list(box), coordinates='top-left',
                            confidence=1, evidence='native-table-rules'))
+    for cap in words:
+        if cap[4].lower() != 'table' or not any(re.fullmatch(r'\d+[.:]?',w[4]) and
+                0 <= w[0]-cap[2] < 12 and abs(w[1]-cap[1]) < 3 for w in words):
+            continue
+        rules=sorted((d['rect'] for d in drawings if d['rect'].height <= 1.5 and
+            abs(d['rect'].x0-cap[0]) < 3 and d['rect'].width > page.rect.width*.2 and
+            d['rect'].y0 > cap[3]),key=lambda r:r.y0)
+        if not rules: continue
+        rule=rules[0]; labels=sorted((w for w in words if abs(w[0]-cap[0])<3 and
+            cap[3]<w[1]<rule.y0 and re.fullmatch(r'\d{1,2}[.)]',w[4])),key=lambda w:w[1])
+        if len(labels)<3 or [int(w[4][:-1]) for w in labels] != list(range(1,len(labels)+1)): continue
+        height=labels[0][3]-labels[0][1]
+        if labels[0][1]-cap[3]>height*2 or rule.y0-labels[-1][3]>height or any(
+                not height*.6<b[1]-a[1]<height*2 for a,b in zip(labels,labels[1:])): continue
+        # The closing rule is already in the native vector layer. Restoring
+        # it a second time changes antialiasing at the crop edge.
+        box=f.Rect(rule.x0-.5,labels[0][1]-1,rule.x1+.5,min(rule.y0-.8,labels[-1][3]+.6))
+        if not any(f.Rect(r['box']).intersects(box) for r in result):
+            result.append(dict(kind='table',box=list(box),coordinates='top-left',confidence=1,
+                               evidence='caption-numbered-rows-closing-rule'))
     return result
 
 

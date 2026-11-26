@@ -1,4 +1,4 @@
-"""Snapshot the complete released bundle; build a Windows-compatible ZIP.
+"""Snapshot the complete application for Windows Setup; optionally archive for internal QA.
 
 No dependency collection, upgrades, pruning, or application execution occurs here.
 """
@@ -93,7 +93,7 @@ def theme_assets(payload: Path, target: Path, version: str) -> None:
     small_image.save(target / "wizard-small.bmp")
 
 
-def make_distribution(source: Path, output: Path, build: int, level: int) -> None:
+def make_distribution(source: Path, output: Path, build: int, level: int, *, internal_zip=False) -> None:
     source, output = source.resolve(), output.resolve()
     if output == source or source in output.parents:
         raise ValueError("Output must be outside the original portable bundle")
@@ -126,6 +126,11 @@ def make_distribution(source: Path, output: Path, build: int, level: int) -> Non
         '#include "LinguaFloat.iss"\n', encoding="utf-8-sig")
     shutil.copy2(Path(__file__), output / "build-input/build_distribution.py")
     shutil.copy2(Path(__file__).parent / "build_installer.ps1", output / "build-input/build_installer.ps1")
+    if not internal_zip:
+        write_json(output / 'build-summary.json', dict(version=version, distribution_build=build,
+            payload_files=len(rows), payload_bytes=total, format='setup', source_directory=str(source)))
+        print('Installer input ready: ' + str(installer / 'Build.iss'), flush=True)
+        return
     archive = output / f"LinguaFloat-v{version}-windows-x64-portable-build{build}.zip"
     print(f"Compressing ZIP (DEFLATE level {level})...", flush=True)
     with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=level,
@@ -186,6 +191,7 @@ if __name__ == "__main__":
     build_parser.add_argument("--source", type=Path, default=ROOT / "exe")
     build_parser.add_argument("--output", type=Path, required=True)
     build_parser.add_argument("--build", type=int, default=1)
+    build_parser.add_argument('--internal-zip', action='store_true', help='Create an additional internal test archive; never publish it.')
     build_parser.add_argument("--level", type=int, default=6, choices=range(1, 10))
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("--archive", type=Path, required=True)
@@ -193,6 +199,6 @@ if __name__ == "__main__":
     verify_parser.add_argument("--extract", type=Path)
     args = parser.parse_args()
     if args.command == "build":
-        make_distribution(args.source, args.output, args.build, args.level)
+        make_distribution(args.source, args.output, args.build, args.level, internal_zip=args.internal_zip)
     else:
         verify_archive(args.archive, args.manifest, args.extract)

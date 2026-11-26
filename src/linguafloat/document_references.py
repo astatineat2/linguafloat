@@ -37,6 +37,32 @@ def _digital_lines(page):
                        size=max((s["size"] for s in spans), default=0),
                        horizontal=line.get("dir", (1, 0)) == (1, 0),
                        bold=bool(spans) and all(s.get("flags", 0) & 16 for s in spans))
+            if (row['horizontal'] and len(spans)>1 and spans[0]['text'].strip() in {'■','▪','●','◆'}
+                    and is_heading(row['text']) and spans[0]['size']>max(s['size'] for s in spans[1:])*1.5):
+                # A decorative bullet's font box can start on the previous
+                # line. Cut only in demonstrably blank space after that line.
+                import pymupdf as f
+                x,y,x2,y2=row['box']; title_top=min(s['bbox'][1] for s in spans[1:])
+                ends=[p['box'][3] for p in rows if p['horizontal'] and p['box'][0]<x2
+                      and p['box'][2]>x and p['box'][1]<y<p['box'][3]<title_top-3]
+                if ends and not page.rotation:
+                    cut=(max(ends)+title_top)/2
+                    band=page.get_pixmap(matrix=f.Matrix(2,2),colorspace=f.csGRAY,alpha=False,
+                                         clip=f.Rect(x,cut-1,x2,title_top-.5))
+                    if band.samples and min(band.samples)>=248:
+                        row['box']=(x,cut,x2,y2)
+            # Some digital pages encode each word as a line beginning with a
+            # microscopic space at the preceding word's endpoint. Check the
+            # visible word as well: a spacer alone must never bridge columns.
+            lead = line['spans'][0] if line['spans'] else None
+            if (rows and spans and row['horizontal'] and rows[-1]['horizontal'] and lead['text'] == ' '
+                    and lead['size'] <= .01 and abs(row['size'] - rows[-1]['size']) < .1):
+                prev = rows[-1]; x,y,x2,y2 = prev['box']; a,b,c,d = row['box']
+                if (abs(a-x2) <= .25 and abs(y-b) <= .25 and abs(y2-d) <= .25
+                        and -.25 <= spans[0]['bbox'][0]-x2 <= row['size']*.75):
+                    prev.update(text=prev['text']+row['text'], box=(x,min(y,b),max(x2,c),max(y2,d)),
+                                bold=prev['bold'] and row['bold'])
+                    continue
             # Some publishers put raised numbers on a shared baseline and do
             # not mark them as superscripts. Require a separate, smaller run.
             if len(spans) >= 2 and line.get("dir", (1, 0)) == (1, 0):
@@ -69,7 +95,35 @@ def _digital_lines(page):
                    box=(x0, min(y0, body["box"][1]), body["box"][2], max(y1, body["box"][3])),
                    bold=row["bold"] and body["bold"])
         consumed.add(id(body))
-    return [r for r in rows if id(r) not in consumed]
+    rows = [r for r in rows if id(r) not in consumed]
+    # Bare labels also occur in ordinary lists. Normalize diagnostic text only
+    # for consecutive author-led entries with a dated, hanging publication.
+    confirmed, candidates = set(), []
+    for idx, row in enumerate(rows):
+        match = re.match(r'^(\d{1,3})\s+(.*)', row['text'].strip())
+        if not (match and row['horizontal'] and (AUTHOR.match(match[2]) or re.fullmatch(r'[A-Z]\.',match[2]))):
+            continue
+        candidates.append((idx, row, int(match[1]), match[2]))
+        body = [match[2]]; x,y = row['box'][:2]; prev = y; size = row['size']
+        for part in rows[idx+1:idx+15]:
+            px,py = part['box'][:2]
+            if not (part['horizontal'] and 2 < px-x < size*4 and 0 < py-prev < size*2.3):
+                break
+            body.append(part['text']); prev = py
+        citation = ' '.join(body)
+        if len(body)>1 and _bibliographic_entry(citation):
+            confirmed.add(idx)
+    groups=[]
+    for item in candidates:
+        _,r,n,_ = item
+        if not groups or not (groups[-1][-1][2]+1==n and 0<r['box'][1]-groups[-1][-1][1]['box'][1]<r['size']*24
+                and abs(r['box'][0]-groups[-1][-1][1]['box'][0])<r['size']):
+            groups.append([])
+        groups[-1].append(item)
+    for group in groups:
+        if sum(idx in confirmed for idx,_,_,_ in group)>=2:
+            for _,r,num,text in group: r['text']=f'{num}. {text}'
+    return rows
 
 
 def _bibliographic_publication(text):
@@ -80,7 +134,7 @@ def _bibliographic_publication(text):
     # ACS and similar styles put a bare year before volume and pages/article ID.
     # A bare year or a URL alone must not turn an instruction into a citation.
     dated_publication = re.search(
-        r"\b[^\W\d_][\w. &'’:\-]*\s+(?:18|19|20)\d{2},\s*"
+        r"\b[^\W\d_][\w. &'’:\-]*(?:\s*\([A-Za-z. ]{1,24}\))?,?\s+(?:18|19|20)\d{2},\s*"
         r"\d{1,4}(?:\s*\(\d{1,3}\))?,\s*(?:No\.\s*)?[A-Za-z]*\d+\b", text)
     # IEEE places the bare year after explicitly labelled volume and pages.
     ieee_publication = re.search(
@@ -88,12 +142,40 @@ def _bibliographic_publication(text):
         r"(?:\s*,\s*no\.\s*\d+)?\s*,\s*pp?\.\s*\d+"
         r"(?:\s*[-\u2013\u2212]\s*\d+)?\s*,\s*(?:18|19|20)\d{2}[a-z]?"
         r"(?=[.,;\s]*(?:$|doi\b|https?://))", text, re.I)
-    return bool((year and publication) or dated_publication or ieee_publication)
+    # Elsevier-style volume (year) page range, sometimes with a supplement.
+    # Require a journal-like suffix, not just a year or an isolated number.
+    volume_year_pages = year and re.search(
+        r",\s*[A-Za-z][\w. &'’\-]{1,80}\s+\d{1,4}(?:\s+Suppl\.?(?:\s+\d+)?)?"
+        r"\s*\((?:18|19|20)\d{2}[a-z]?\)\s*[A-Za-z]?\d+(?:,\d{3})*\s*[-–−]\s*[A-Za-z]?\d+(?:,\d{3})*\b",text)
+    return bool((year and publication) or dated_publication or ieee_publication or volume_year_pages)
 
 
 def _bibliographic_entry(text):
     """Independent author, date and publication evidence, including Unicode names."""
     return bool(AUTHOR.match(text) and _bibliographic_publication(text))
+
+
+def _aligned_author_entries(lines):
+    # Flush-left and first-line-indent bibliographies do not satisfy the
+    # hanging-indent detector. Require repeated complete journal citations.
+    name = r"[^\W\d_][\w'’\-]+(?:\s+[^\W\d_][\w'’\-]+){0,2}?,?\s+[A-Z](?:\.|[A-Z]{0,3}(?=\s|,))"
+    author = re.compile(r'^'+name+r'.{0,75}?(?:,\s*|\s+&\s+|\s+and\s+)'+name)
+    journal = re.compile(r'\b[A-Z][A-Za-z. &]{1,65}\s+\d{1,4}\s*[:,]\s*(?:[A-Za-z]?\d+\s*[-–−]\s*\d+|[a-z]\d{3,}|\d{5,})\b')
+    starts=[i for i,r in enumerate(lines) if r.get('horizontal') and r.get('size',0)>0 and author.match(r['text'].strip())]
+    good=[]; consumed=set()
+    for i in starts:
+        if i in consumed:continue
+        row=lines[i]; group=[row]; size=row['size']; x=row['box'][0]
+        for r in lines[i+1:i+13]:
+            if (not r.get('horizontal') or abs(r.get('size',0)-size)>size*.25 or abs(r['box'][0]-x)>size*2.5
+                    or not -1<=r['box'][1]-group[-1]['box'][1]<=size*1.95):break
+            if author.match(r['text'].strip()) and abs(r['box'][0]-x)<2 and any(re.search(r'\(\d{4}[a-z]?\)',g['text']) for g in group):break
+            group.append(r)
+        text=re.sub(r'(?<=[a-z])-\n(?=[a-z])','','\n'.join(r['text'].strip() for r in group)).replace('\n',' ')
+        date=re.search(r'\((?:18|19|20)\d{2}[a-z]?\)',text)
+        if len(group)>=2 and date and journal.search(text[date.end():]):
+            good.append(row);consumed.update(range(i+1,i+len(group)))
+    return [r for r in good if sum(abs(r['box'][0]-s['box'][0])<=2 for s in good)>=2]
 
 
 def _author_year_citations(lines):
@@ -102,7 +184,7 @@ def _author_year_citations(lines):
     authors = [r for r in lines if r.get("horizontal") and r.get("size", 0) > 0
                and AUTHOR.match(r["text"].strip())]
     if not authors:
-        return []
+        return _aligned_author_entries(lines)
     left = min(r["box"][0] for r in authors)
     anchors = [r for r in authors if abs(r["box"][0] - left) <= 3]
     confirmed = []
@@ -119,7 +201,8 @@ def _author_year_citations(lines):
                 and any(r["box"][0] > left + max(3, anchor["size"] * .7) for r in rows[1:])
                 and _bibliographic_entry(" ".join(r["text"].strip() for r in rows))):
             confirmed.append(anchor)
-    return confirmed
+    if len(confirmed)>=2:return confirmed
+    return _aligned_author_entries(lines) or confirmed
 
 
 def _author_year_right_top(lines, split, left_anchors):
@@ -129,7 +212,9 @@ def _author_year_right_top(lines, split, left_anchors):
         return None
     first = citations[0]
     top = first["box"][1]
-    prefix = [r for r in right if r["box"][1] < top]
+    prefix = [r for r in right if r["box"][1] < top and not (
+        r['text'].strip().isdigit() and r['box'][0] > first['box'][0]+(first['box'][2]-first['box'][0])*.7
+        and top-r['box'][3] > first['size']*2)]
     if not prefix:
         return top
     # Join a hanging title across the gutter only when the unfinished left
@@ -142,7 +227,12 @@ def _author_year_right_top(lines, split, left_anchors):
         tail = " ".join(r["text"].strip() for r in left[starts[-1]:])
         suffix = " ".join(r["text"].strip() for r in prefix)
         size = first["size"]
-        if (not _bibliographic_entry(tail) and _bibliographic_entry(tail + " " + suffix)
+        # A journal name alone can already pass _bibliographic_entry even
+        # though its terminal volume and page range still cross the gutter.
+        joined = tail + ' ' + suffix
+        finishes_pages = (not tail.rstrip().endswith('.') and re.search(
+            r',\s*\d{1,4},\s*\d{1,6}\s*(?:[-–−]|e)\s*\d{1,6}\.\s*$', joined))
+        if ((not _bibliographic_entry(tail) or finishes_pages) and _bibliographic_entry(joined)
                 and all(r["horizontal"] and r["box"][0] > first["box"][0] + max(3, size * .7)
                         and abs(r["box"][0] - prefix[0]["box"][0]) <= 3
                         and abs(r["size"] - size) <= size * .2 for r in prefix)
@@ -398,7 +488,7 @@ def filter_layout_paragraphs(page, boundary, retain=None):
         page.pdf_paragraph[:] = []
         return
     height = page.cropbox.box.y2
-    boxes = [(x0, height-y1, x1, height-y0) for x0,y0,x1,y1 in reference_boxes(boundary, page.page_number)]
+    boxes = boundary.get('pdf_boxes',{}).get(str(page.page_number)) or [(x0, height-y1, x1, height-y0) for x0,y0,x1,y1 in reference_boxes(boundary, page.page_number)]
     keep = []
     for paragraph in page.pdf_paragraph:
         if not (paragraph.unicode or "").strip():
@@ -417,6 +507,19 @@ def filter_layout_paragraphs(page, boundary, retain=None):
         if overlaps:
             if is_heading(paragraph.unicode or ""):
                 continue
+            # Fonts include ascender/descender padding. A sliver touching the
+            # next heading is not a crossing if every source glyph is outside.
+            if all(min(box.y2,a[3])-max(box.y,a[1]) <= 1.5 for a in overlaps):
+                from linguafloat.document_scientific import composition_chars
+                parts=getattr(paragraph,'pdf_paragraph_composition',())
+                glyphs=[c for p in parts for c in composition_chars(p) if (c.char_unicode or '').strip()]
+                compact=lambda s: ''.join(s.split())
+                if (glyphs and not any(p.pdf_formula for p in parts) and
+                        compact(''.join(c.char_unicode for c in glyphs))==compact(paragraph.unicode or '') and
+                        all(c.box and all(not (a[0] <= (c.box.x+c.box.x2)/2 <= a[2] and
+                            a[1] <= (c.box.y+c.box.y2)/2 <= a[3]) for a in overlaps) for c in glyphs)):
+                    keep.append(paragraph)
+                    continue
             if not any(box.x >= a[0]-2 and box.x2 <= a[2]+2 and box.y >= a[1]-2 and box.y2 <= a[3]+2 for a in overlaps):
                 error = DocumentError(f"第 {page.page_number + 1} 页参考文献边界穿过正文段落；该段保留原文，需核对。")
                 if retain is None:
@@ -427,7 +530,7 @@ def filter_layout_paragraphs(page, boundary, retain=None):
     page.pdf_paragraph[:] = keep
 
 
-def retain_pdf_tail(target, source, boundary):
+def retain_pdf_tail(target, source, boundary, *, offset=(0, 0)):
     """Clip the translated prefix and original tail without destructive redaction."""
     import pymupdf as fitz
     if source.rotation or source.cropbox.x0 or source.cropbox.y0:
@@ -471,7 +574,12 @@ def retain_pdf_tail(target, source, boundary):
     areas = [a for a in areas if not a.is_empty]
     if not areas:
         return
-    prefix = [target.rect]
+    shift = (*offset, *offset)
+    placed = [area + shift for area in areas]
+    destination = source.rect + shift if offset != (0, 0) else target.rect
+    if not target.rect.contains(destination):
+        raise DocumentError('参考文献回填区域超出译文面。')
+    prefix = [source.rect]
     for area in areas:
         prefix = subtract(prefix, area)
 
@@ -479,7 +587,7 @@ def retain_pdf_tail(target, source, boundary):
         r = box * ~target.transformation_matrix
         return f"{r.x0:.8f} {r.y0:.8f} {r.width:.8f} {r.height:.8f} re\n".encode("ascii")
 
-    def project(page, erased, path):
+    def project(page, erased, path, dest):
         with fitz.open() as clean:
             clean.insert_pdf(page.parent, from_page=page.number, to_page=page.number)
             from linguafloat.document_publisher_footer import _explicit_text_matrices
@@ -492,24 +600,91 @@ def retain_pdf_tail(target, source, boundary):
                 # vectors and images intact; the compound clip owns their paint.
                 clean[0].apply_redactions(images=0, graphics=0, text=0)
             if clean[0].get_contents():
-                target.show_pdf_page(target.rect, clean, 0)
+                target.show_pdf_page(dest, clean, 0)
                 xref = target.get_contents()[-1]
                 target.parent.update_stream(xref, b"q\n" + path + target.parent.xref_stream(xref) + b"\nQ")
 
     with fitz.open(stream=target.parent.tobytes(), filetype="pdf") as rendered:
-        # Replace content streams, preserving page geometry and annotations.
-        for xref in target.get_contents():
-            target.parent.update_stream(xref, b"")
-        paths = [rectangle(area) for area in areas]
+        # Existing streams may be shared by every sheet of a bilingual PDF.
+        # Detach this page instead of mutating the shared objects.
+        xref = target.parent.get_new_xref()
+        target.parent.update_object(xref, '<<>>')
+        target.parent.update_stream(xref, b'')
+        target.set_contents(xref)
+        paths = [rectangle(area) for area in placed]
         outer = rectangle(target.rect)
-        project(rendered[target.number], areas, b"".join(outer + path + b"W* n\n" for path in paths))
-        project(source, prefix, b"".join(paths) + b"W n\n")
+        project(rendered[target.number], placed, b"".join(outer + path + b"W* n\n" for path in paths), target.rect)
+        project(source, prefix, b"".join(paths) + b"W n\n", destination)
+    # The same-coordinate projection replaces the anchors as well as the ink.
+    # Keep adjacent actions and do not move internal destinations between PDFs.
+    from linguafloat.document_masthead import external_web_uri
+    for item in target.get_links():
+        box = fitz.Rect(item['from'])
+        if external_web_uri(target, item) and any(a.contains((box.tl+box.br)*.5) for a in placed):
+            target.delete_link(item)
+    for item in source.get_links():
+        box = fitz.Rect(item['from'])
+        if any(a.contains(box) for a in areas) and (uri := external_web_uri(source, item)):
+            target.insert_link(dict(kind=fitz.LINK_URI, uri=uri, **{'from': box+shift}))
 
 
 def require_boundary(boundary, kind):
     if boundary is None:
         raise DocumentError(f"已启用‘参考文献及后续内容不翻译’，但无法在{kind}中可靠确认正文参考文献标题和连续条目。未发送翻译请求；请检查章节结构或关闭此选项。")
     return boundary
+
+
+def headed_numbered_columns(page, lines=None):
+    """Identify a terminal bibliography whose second column starts above its title."""
+    import pymupdf as fitz
+
+    if page.rotation or page.cropbox.tl != fitz.Point(0, 0) or page.number != len(page.parent)-1:
+        return None
+    lines = _digital_lines(page) if lines is None else lines
+    width, height = page.rect.width, page.rect.height
+    mid = width / 2
+    heads = [r for r in lines if is_heading(r['text']) and r['horizontal'] and r['bold']
+             and r['box'][2] < mid and height*.08 < r['box'][1] < height*.9]
+    if len(heads) != 1:
+        return None
+    head = heads[0]
+    columns, numbers, tops = [], [], []
+    for side in (0, 1):
+        rows = sorted((r for r in lines if int(r['box'][0] >= mid) == side
+                       and r['horizontal'] and r['box'][1] < height*.93
+                       and (side or r['box'][1] > head['box'][3])), key=lambda r: r['box'][1])
+        first = next((i for i, row in enumerate(rows) if NUMBER.match(row['text'])), None)
+        if first is None or (not side and first):
+            return None
+        body = rows[first:]
+        tops.append(body[0]['box'][1])
+        entries = []
+        for row in body:
+            box = row['box']
+            if (not side and box[2] > mid+1) or abs(row['size']-body[0]['size']) > 1.5:
+                return None
+            if match := NUMBER.match(row['text']):
+                numbers.append(int(next(g for g in match.groups() if g)))
+                entries.append(LABEL.sub('', row['text'], count=1))
+            elif entries and box[0] > body[0]['box'][0]+2:
+                entries[-1] += ' ' + row['text']
+            else:
+                return None
+        if len(entries) < 3 or sum(bool(re.search(r'\b(?:18|19|20)\d\d\b', e)) and
+                                   bool(re.search(r'\b[A-Za-z][\w.]*\s+\d', e)) for e in entries) < .8*len(entries):
+            return None
+        top = (tops[-1] if side else head['box'][1]) - 2
+        columns.append([mid if side else 0, top, width if side else mid, height])
+    if tops[1] >= head['box'][1]-3 or numbers != list(range(1, len(numbers)+1)):
+        return None
+    # A full-width band or unrelated heading crossing the gutter is not a column tail.
+    if any(r['box'][0] < mid-1 < r['box'][2] and r['box'][3] > min(b[1] for b in columns)
+           and not r['text'].strip().isdigit() for r in lines):
+        return None
+    number = page.number
+    return dict(page=number, y=head['box'][1], title=head['text'], scanned=False, column='both',
+                boxes=columns, page_boxes={str(number): columns}, whole_pages=[], uncertain_pages=[],
+                evidence='headed-terminal-numbered-columns', policy='bibliography-only-v3')
 
 
 def _pdf_start(source, control, emit):
@@ -536,6 +711,9 @@ def _pdf_start(source, control, emit):
     for number, page in enumerate(source):
         control.checkpoint()
         if page.rotation or page.cropbox.x0 or page.cropbox.y0:
+            from linguafloat.document_source_fidelity import cropped_bibliography
+            verified=cropped_bibliography(page)
+            if verified:return verified
             continue
         text = page.get_text("text")
         scanned = has_scanned_text_layer(page) or needs_page_ocr(page, text)
@@ -549,6 +727,8 @@ def _pdf_start(source, control, emit):
             continue
         if sum(bool(re.search(r"(?:\.{3,}|…{2,}|·{3,})\s*\d+\s*$", row["text"])) for row in lines) >= 2:
             continue  # Contents pages can contain a References entry.
+        if not scanned and (columns := headed_numbered_columns(page, lines)):
+            return columns
         for line in lines:
             if not is_heading(line["text"]):
                 continue
@@ -584,7 +764,35 @@ def _pdf_start(source, control, emit):
                                    or (r["box"][0] >= middle) == (line["box"][0] >= middle))]
             author_citations = _author_year_citations(following_rows) if not scanned else []
             numbered = numbered_evidence(subsequent)
-            if not numbered and len(author_citations) < 2:
+            joined_top=None
+            if (not scanned and not numbered and len(author_citations)<2 and line['box'][2]<middle
+                    and top>page.rect.height*.75):
+                tail=sorted(following_rows,key=lambda r:r['box'][1]); right=sorted((r for r in lines if r['box'][0]>=middle),key=lambda r:r['box'][1]); cites=_author_year_citations(right)
+                if tail and len(cites)>=2:
+                    first=tail[0]; prefix=[r for r in right if r['box'][1]<cites[0]['box'][1] and not r['text'].strip().isdigit()]; joined=' '.join(r['text'].strip() for r in prefix)
+                    # A flush-left publisher style may wrap the year to the
+                    # second line, then carry the unfinished article title to
+                    # the next column. Require the two halves, journal/pages,
+                    # and several independent following citations together.
+                    if (len(tail)==2 and len(prefix)==2 and len(cites)>=3
+                            and AUTHOR.match(first['text'].strip())
+                            and re.match(r'^\s*\((?:19|20)\d{2}[a-z]?\)\.\s+\S',tail[1]['text'])
+                            and tail[1]['text'].rstrip()[-1:].islower() and prefix[0]['text'].lstrip()[:1].islower()
+                            and re.fullmatch(r'[A-Z][\w &.,\-]+\s+\d+(?:\(\d+\))?,\s*\d+[-–]\d+\.',prefix[1]['text'].strip())
+                            and _bibliographic_entry(' '.join(r['text'] for r in tail+prefix))
+                            and abs(tail[1]['box'][0]-first['box'][0])<1
+                            and all(abs(r['box'][0]-cites[0]['box'][0])<1 for r in prefix)
+                            and all(r['horizontal'] and abs(r['size']-first['size'])<.3 for r in tail+prefix+[cites[0]])
+                            and all(0<b['box'][1]-a['box'][1]<2.1*first['size'] for a,b in
+                                    [(tail[0],tail[1]),(prefix[0],prefix[1]),(prefix[1],cites[0])])):
+                        author_citations=[first];joined_top=prefix[0]['box'][1]
+                    if (len(tail)<=4 and len(prefix) in (1,2,3) and AUTHOR.match(first['text'].strip())
+                            and re.search(r'\((?:19|20)\d{2}\)',first['text']) and _bibliographic_entry(' '.join(r['text'] for r in tail)+' '+joined)
+                            and re.fullmatch(r'[A-Z][\w &.,\-]+,\s*\d+(?:\(\d+\))?,\s*\d+[e–\-]\d+\.?',joined)
+                            and all(r['horizontal'] and abs(r['size']-first['size'])<1 and r['box'][0]>cites[0]['box'][0]+3 for r in prefix)
+                            and all(0<=b['box'][1]-a['box'][1]<2*first['size'] for a,b in zip(prefix,prefix[1:]+[cites[0]]))):
+                        author_citations=[first];joined_top=prefix[0]['box'][1]
+            if not numbered and len(author_citations) < 2 and joined_top is None:
                 continue
             if numbered and (_section_text(line["text"]) != re.sub(r"\s+", " ", line["text"]).strip()
                              or any(re.match(r"\s*\(\d{1,3}\)", text) for text in subsequent)):
@@ -621,7 +829,7 @@ def _pdf_start(source, control, emit):
                 split = _reference_column_split(column_lines, page)
                 if split is None:
                     continue
-                right_top = _author_year_right_top(column_lines, split, author_citations)
+                right_top = joined_top if joined_top is not None else _author_year_right_top(column_lines, split, author_citations)
                 column = "both" if right_top is not None else "left"
                 boxes = [[0, top, split, page.rect.height]]
                 if right_top is not None:
@@ -789,6 +997,8 @@ def _reference_section_end(row, lines, page, split, scanned):
 def _reference_number(row):
     if row.get("citation_number") is not None:
         return row["citation_number"]
+    if re.match(r'^\s*10\.\d{4,9}/\S',row['text']):
+        return None  # A DOI wrapped onto its own line, not item number 10.
     match = NUMBER.match(row["text"])
     return int(next(g for g in match.groups() if g)) if match else None
 
@@ -830,7 +1040,7 @@ def _join_numbered_publication_lines(lines, split):
     return result
 
 
-def _reference_continues(lines, last_number, split=None, *, author_year=False):
+def _reference_continues(lines, last_number, split=None, *, author_year=False, page=None):
     numbers = [n for row in lines if (n := _reference_number(row)) is not None]
     # Wrapped DOI suffixes such as "10.1016/..." are not numbered entries in
     # an independently confirmed author-year bibliography.
@@ -840,7 +1050,21 @@ def _reference_continues(lines, last_number, split=None, *, author_year=False):
             return False
         texts = [f"[{r['citation_number']}] {r['citation_text']}" if r.get("citation_number") is not None
                  else r["text"] for r in lines]
-        return _numbered_citation_evidence(texts, numbers[0], min(2, len(numbers)))
+        if _numbered_citation_evidence(texts, numbers[0], min(2, len(numbers))):
+            return True
+        # A linked institutional publication need not have a personal author or
+        # journal date. Confirm its printed destination and the next two papers.
+        if page is None or len(numbers) < 3:
+            return False
+        import pymupdf as fitz
+        starts = [i for i, row in enumerate(lines) if _reference_number(row) is not None]
+        first = lines[starts[0]:starts[1]]
+        if not _numbered_citation_evidence(texts[starts[1]:], numbers[1], 2):
+            return False
+        printed = ''.join(re.sub(r'\s+', '', r['text']) for r in first).rstrip('.,;')
+        return any(link.get('kind') == fitz.LINK_URI and (uri := link.get('uri', '')).startswith(('https://', 'http://'))
+                   and printed.endswith(uri) and any(fitz.Rect(r['box']).intersects(link['from']) and
+                   uri.startswith(r['text'].strip()) for r in first if r['text'].strip()) for link in page.get_links())
     columns = [lines] if split is None else [[r for r in lines if r["box"][0] < split],
                                             [r for r in lines if r["box"][0] >= split]]
     return all(len(_author_year_citations(column)) >= 2 for column in columns)
@@ -849,6 +1073,9 @@ def _reference_continues(lines, last_number, split=None, *, author_year=False):
 def pdf_boundary(source, control, emit):
     """Locate a bounded bibliography, rather than treating the document tail as one."""
     boundary = _pdf_start(source, control, emit)
+    if boundary and boundary.get('evidence') in {'cropped-terminal-numbered-columns',
+                                                  'headed-terminal-numbered-columns'}:
+        return boundary
     if not boundary:
         return None
     from linguafloat.document_pdf import DocumentOcr, has_scanned_text_layer, needs_page_ocr
@@ -882,7 +1109,8 @@ def pdf_boundary(source, control, emit):
                    and any(b[0] <= r["box"][0] < b[2] and b[1] <= r["box"][1] < b[3] for b in boxes)]
         end = endings[0] if endings else None
         if number > boundary["page"] and not end and not _reference_continues(
-                lines, last_number, split, author_year=boundary.get("evidence") == "headed-author-year-citations"):
+                lines, last_number, split, author_year=boundary.get("evidence") == "headed-author-year-citations",
+                page=None if scanned else page):
             boundary["uncertain_end"] = dict(page=number, reason="unconfirmed-reference-continuation")
             emit({"type": "progress", "stage": "解析中", "value": None,
                   "message": f"第 {number + 1} 页未确认参考文献续页，不将后续正文自动纳入保护范围。"})

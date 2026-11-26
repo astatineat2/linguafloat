@@ -30,7 +30,7 @@ def test_graphics_disabled_without_eligible_body_and_lives_in_footer(controller)
     c, _, _ = controller
     page = c.window.documents
     assert not page.graphics_button.isEnabled()
-    assert page.graphics_button.text() == '图片翻译'
+    assert page.graphics_button.text() == '图表翻译'
     assert page.graphics_button.parentWidget() is page.start_button.parentWidget()
     page.set_busy(True)
     assert not page.graphics_button.isEnabled()
@@ -105,7 +105,7 @@ def test_confirmation_is_required_before_queue(history, application, monkeypatch
     if choice == 'yes':
         job = history.queue[0][0]
         assert job.parent_job_id == 'partial' and job.workflow == 'graphics'
-        assert job.pages == '2,6' and job.translate_figures and not job.translate_tables
+        assert job.pages == '2,6' and job.translate_figures and job.translate_tables
         history.queue.clear()
         history.page.set_busy(False)
 

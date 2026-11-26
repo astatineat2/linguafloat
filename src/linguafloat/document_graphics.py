@@ -7,10 +7,10 @@ import json
 import re
 from pathlib import Path
 
-SCHEMA = "graphics-v21-caption-edges"
+SCHEMA = "graphics-v22-numbered-table"
 AREA_SCHEMA = "graphic-areas-v5-caption-edges"
 # Area ownership changed: old body snapshots may already contain table prose.
-PROTECTION_SCHEMA = "graphics-v11-native-caption-edges"
+PROTECTION_SCHEMA = "graphics-v12-numbered-table"
 
 CONNECTIVES = frozenset("of in to at on by for and the a an or with without from".split())
 CHEMICAL_LOCANT = re.compile(
@@ -662,7 +662,7 @@ class GraphicAnalyzer:
         """
         import numpy as np
         import pymupdf as fitz
-        key = f"{AREA_SCHEMA}:{digest}:{page.number}"
+        key = f"{AREA_SCHEMA}:numbered-table-v2:{digest}:{page.number}"
         cached = self.store.get(key) if self.store else None
         if cached:
             return json.loads(cached)
@@ -740,8 +740,13 @@ class GraphicAnalyzer:
                 continue
             areas.append(candidate)
         areas.sort(key=lambda a:(a["box"][1],a["box"][0]))
+        existing = 0
         for index, area in enumerate(areas):
-            area['id'] = f"p{page.number+1}-{index+1}"
+            if area.get('evidence') == 'caption-numbered-rows-closing-rule':
+                area['id'] = f"p{page.number+1}-numbered-{index+1}"
+            else:
+                existing += 1
+                area['id'] = f"p{page.number+1}-{existing}"
         if self.store:
             self.store.put(key,json.dumps(areas,ensure_ascii=False))
         return areas
@@ -1325,11 +1330,19 @@ class DocumentEnhancer:
         target = target.parent.reload_page(target)
         records.extend(repair_navigation(source,target,self.translator))
         target = target.parent.reload_page(target)
+        if getattr(self.translator.job,'workflow',None)=='body':
+            from linguafloat.document_rotated_notes import repair
+            records.extend(repair(source,target,getattr(self,'body_areas',{}).get(source.number,()),self.translator))
+            target = target.parent.reload_page(target)
         for index, record in enumerate(records, 1):
             record["id"] = f"P{source.number+1}-F{index}"
         self.records.extend(records)
+        if any(r.get('status')=='untranslated' for r in records):
+            # Leave adjacent contact fields visible when the marker chooses a blank label area.
+            from linguafloat.document_publisher_footer import restore_printed_urls
+            restore_printed_urls(source,target)
         mark([r for r in records if r.get("status") == "untranslated"])
-        if graphics and self.analyzer:
+        if graphics and self.analyzer and getattr(self.translator.job, 'workflow', None) != 'body':
             overrides=self.translator.job.graphic_overrides.get(self.digest,{})
             graphics = apply_graphics(source,target,self.translator,self.analyzer,self.digest,overrides)
             for i, record in enumerate(graphics, 1):

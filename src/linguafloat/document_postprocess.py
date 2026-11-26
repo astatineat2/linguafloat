@@ -265,6 +265,8 @@ def translate_graphics_only(job, translator, output, emit, *, store=None):
         source_links = restore_bilingual_source_links(
             dual, source, bilingual_map, job.bilingual_layout, translator.control) if job.bilingual else {}
         paths = []
+        if not job.mono:
+            mono.save(Path(output) / 'export-panel.pdf', garbage=4, deflate=True)
         for enabled, label, doc in ((job.mono, "译文", mono), (job.bilingual, "双语", dual)):
             if enabled:
                 path = Path(output) / f"{Path(job.source).stem}.{label}.pdf"

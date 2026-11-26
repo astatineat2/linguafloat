@@ -355,6 +355,20 @@ def numbered_document(numbers=('101', '102', '103'), *, changed_font=None, shift
     return pdf
 
 
+def test_facing_folios_with_total_require_actual_page_and_document_count():
+    import pymupdf
+    from linguafloat.document_structure import _page_numbers
+    with pymupdf.open() as doc:
+        for n in range(1, 4):
+            page = doc.new_page(width=400, height=600)
+            x = 35 if n % 2 else 365 - pymupdf.get_text_length(f'{n} of 3', fontsize=9)
+            page.insert_text((x, 579), f'{n} of 3', fontsize=9)
+            page.insert_text((180, 300), f'{n} of 3', fontsize=9)
+            page.insert_text((180, 579), f'{n} of 9', fontsize=9)
+        for n, page in enumerate(doc, 1):
+            assert [r['text'] for r in _page_numbers(page)] == [f'{n} of 3']
+
+
 def test_page_numbers_require_adjacent_source_sequence_and_keep_body_digits():
     with numbered_document() as pdf:
         for index, expected in enumerate(('101', '102', '103')):

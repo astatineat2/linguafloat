@@ -33,6 +33,20 @@ def engine():
     return e
 
 
+def test_wrapped_date_in_prose_is_sent_as_words_not_native_math():
+    a=run('In',x=250,y=110).pdf_same_style_characters.pdf_character
+    b=run('1998',x=20,y=98).pdf_same_style_characters.pdf_character
+    formula=PdfFormula(pdf_character=a+b)
+    p=PdfParagraph(unicode='Prior work. In 1998 the investigators reported changes.',layout_label='plain text',pdf_style=a[0].pdf_style,
+        pdf_paragraph_composition=[run('Prior work.',font='bold'),Part(pdf_formula=formula),run(' the investigators reported changes.')])
+    def text():return styled_translate_input(engine(),p,lambda *_:None).unicode
+    assert 'In 1998' in text()
+    assert p.pdf_paragraph_composition[1].pdf_formula is formula
+    p.layout_label='table';assert '1998' not in text()
+    p.layout_label='plain text';formula.is_corner_mark=True;assert '1998' not in text()
+    formula.is_corner_mark=False;b[0].pdf_style.font_size=5;assert '1998' not in text()
+
+
 def test_formula_extraction_retains_bold_prose_runs_and_caption_glyphs():
     page,p=caption()
     remembered=remember_caption_markers(page)

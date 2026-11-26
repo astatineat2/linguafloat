@@ -111,6 +111,7 @@ class Release:
     notes: str
     page: str
     tag: str
+    setup: bool = False
 
 
 def parse_manifest(payload: bytes, signature: bytes, channel: dict, current: str) -> Release:
@@ -119,7 +120,7 @@ def parse_manifest(payload: bytes, signature: bytes, channel: dict, current: str
         value = json.loads(payload)
         version = Version(value["version"])
         minimum = Version(value["minimum_updater"])
-        if (value["schema"] != 1 or value["architecture"] != "win-x64" or value["repository"] != channel["repository"]
+        if (type(value["schema"]) is not int or value["schema"] not in (1, 2) or value["architecture"] != "win-x64" or value["repository"] != channel["repository"]
                 or value.get("candidate_only") is True):
             raise ValueError()
         if version.is_prerelease or version.is_devrelease or version.local is not None:
@@ -136,7 +137,10 @@ def parse_manifest(payload: bytes, signature: bytes, channel: dict, current: str
         page = github_url(value["page"], channel["repository"])
         if f"/download/{tag}/" not in url or page != f"https://github.com/{channel['repository']}/releases/tag/{tag}":
             raise ValueError()
-        return Release(str(version), url, size, unpacked, value["sha256"], str(value.get("notes", ""))[:20000], page, tag)
+        setup = value['schema'] == 2
+        if setup and url != f"https://github.com/{channel['repository']}/releases/download/{tag}/LinguaFloat-{tag}-windows-x64-Setup.exe":
+            raise ValueError()
+        return Release(str(version), url, size, unpacked, value["sha256"], str(value.get("notes", ""))[:20000], page, tag, setup)
     except (KeyError, TypeError, ValueError, InvalidVersion) as exc:
         raise UpdateError("更新说明的版本、架构或文件信息无效。") from exc
 
@@ -246,6 +250,11 @@ def sha256_file(path: Path) -> str:
 def check_archive(path: Path, release: Release) -> None:
     if path.stat().st_size != release.size or sha256_file(path) != release.sha256:
         raise UpdateError("更新包大小或 SHA-256 校验失败，请重新下载；当前版本未更改。")
+    if release.setup:
+        with path.open('rb') as stream:
+            if stream.read(2) != b'MZ':
+                raise UpdateError('更新包不是 Windows Setup 程序。')
+        return
     try:
         with zipfile.ZipFile(path) as archive:
             names, total = set(), 0
@@ -278,7 +287,7 @@ def check_archive(path: Path, release: Release) -> None:
 
 def download_release(client, release: Release, directory: Path, progress, cancelled) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / "package.zip"
+    target = directory / ('Setup.exe' if release.setup else 'package.zip')
     if target.exists():
         check_archive(target, release)
         return target

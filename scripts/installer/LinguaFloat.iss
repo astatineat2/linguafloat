@@ -3,9 +3,15 @@
   #error Build the distribution snapshot first and compile its Build.iss
 #endif
 #define AppName "LinguaFloat"
+#ifndef MenuGroup
+  #define MenuGroup "LinguaFloat"
+#endif
+#ifndef ProductGuid
+  #define ProductGuid "7AB27613-3319-49B5-A2EB-796458D9C0F6"
+#endif
 
 [Setup]
-AppId={{7AB27613-3319-49B5-A2EB-796458D9C0F6}
+AppId={{{#ProductGuid}}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} v{#AppVersion}
@@ -13,7 +19,7 @@ AppPublisher=LinguaFloat
 VersionInfoVersion={#AppVersion}.{#DistributionBuild}
 VersionInfoDescription=LinguaFloat 中文安装程序
 DefaultDirName={localappdata}\Programs\LinguaFloat
-DefaultGroupName=LinguaFloat
+DefaultGroupName={#MenuGroup}
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -45,7 +51,7 @@ Compression=lzma2/normal
 SolidCompression=yes
 LZMANumBlockThreads=2
 OutputDir={#DistOutput}
-OutputBaseFilename=LinguaFloat-v{#AppVersion}-windows-x64-setup-build{#DistributionBuild}
+OutputBaseFilename=LinguaFloat-v{#AppVersion}-windows-x64-Setup
 SetupLogging=yes
 Uninstallable=yes
 UninstallDisplayName=LinguaFloat v{#AppVersion}
@@ -142,7 +148,8 @@ end;
 
 function ValidateTarget(const Target: String): String;
 var
-  ProbeParent, ProbeFile: String;
+  ProbeParent, ProbeFile, Registered: String;
+  Entry: TFindRec;
 begin
   Result := '';
   if IsWithin(Target, ExpandConstant('{win}')) or
@@ -155,15 +162,32 @@ begin
     Result := '安装位置与已有文件重名，请选择其他文件夹。';
     Exit;
   end;
+  if RegQueryStringValue(HKCU64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{{#ProductGuid}}_is1', 'InstallLocation', Registered) then begin
+    if CompareText(RemoveBackslashUnlessRoot(Registered), RemoveBackslashUnlessRoot(Target)) <> 0 then begin
+      Result := '当前用户已经在其他位置安装 LinguaFloat。请更新原安装，或先从开始菜单卸载。';
+      Exit;
+    end;
+  end else if FindFirst(AddBackslash(Target) + '*', Entry) then begin
+    try
+      repeat
+        if (Entry.Name <> '.') and (Entry.Name <> '..') then begin
+          Result := '首次使用 Setup 请选择空的专用文件夹，以免覆盖已有文件。';
+          Exit;
+        end;
+      until not FindNext(Entry);
+    finally
+      FindClose(Entry);
+    end;
+  end;
   ProbeParent := Target;
   while not DirExists(ProbeParent) do begin
     if ExtractFileDir(ProbeParent) = ProbeParent then Break;
     ProbeParent := ExtractFileDir(ProbeParent);
   end;
   ProbeFile := AddBackslash(ProbeParent) + '.linguafloat-install-' + GetDateTimeString('yyyymmddhhnnsszzz', #0, #0) + '.tmp';
-  if FileExists(ProbeFile) or not SaveStringToFile(ProbeFile, 'write-check', False) then
+  if not CreateDir(ProbeFile) then
     Result := '无法写入所选位置，请选择当前用户有写入权限的文件夹。'
-  else if not DeleteFile(ProbeFile) then
+  else if not RemoveDir(ProbeFile) then
     Result := '无法清理安装位置的权限检查文件，请选择其他目录并检查磁盘权限。';
 end;
 
@@ -172,7 +196,7 @@ var
   Problem: String;
 begin
   Result := True;
-  if CurPageID = wpSelectDir then begin
+  if (CurPageID = wpSelectDir) and not WizardSilent then begin
     Problem := ValidateTarget(WizardDirValue);
     if Problem <> '' then begin
       MsgBox(Problem, mbError, MB_OK);
@@ -207,7 +231,7 @@ begin
   Running := RunningInTarget(ExpandConstant('{app}'));
   Result := Running = '';
   if not Result then
-    MsgBox('无法安全卸载：请先保存任务并通过托盘退出 LinguaFloat，待文档处理结束后重试。用户配置和历史不会删除。', mbError, MB_OK);
+    SuppressibleMsgBox('无法安全卸载：请先保存任务并通过托盘退出 LinguaFloat，待文档处理结束后重试。用户配置和历史不会删除。', mbError, MB_OK, IDOK);
 end;
 
 procedure InitializeWizard;

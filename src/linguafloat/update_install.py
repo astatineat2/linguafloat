@@ -34,6 +34,19 @@ def check_portable_folder(target: Path) -> None:
         raise UpdateError(f"安装目录含非程序文件，未进行替换：{target}。请将完整便携包解压到单独的文件夹。")
 
 
+def check_setup_target(target: Path) -> None:
+    import winreg
+    check_target_path(target)
+    key = r'Software\Microsoft\Windows\CurrentVersion\Uninstall\{7AB27613-3319-49B5-A2EB-796458D9C0F6}_is1'
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as entry:
+            location = Path(winreg.QueryValueEx(entry, 'InstallLocation')[0])
+    except OSError as exc:
+        raise UpdateError('此程序不是当前用户登记的 Setup 安装版，未启动更新。') from exc
+    if not location.is_absolute() or location.resolve() != target or not (target / 'LinguaFloat.exe').is_file():
+        raise UpdateError('Setup 登记位置与当前启动位置不一致，未更新其他安装。')
+
+
 def load_request(directory: Path) -> dict:
     root = update_directory().resolve()
     directory = directory.resolve()
@@ -204,7 +217,12 @@ def install(directory: Path, *, recover=False, launch=launch_application, health
             return
         if state.get("phase") not in (None, "prepared"):
             raise UpdateError("此更新已处理或需要恢复，不可重复安装。")
-        check_portable_folder(target)
+        release = parse_manifest((directory / "update.json").read_bytes(),
+                                 (directory / "update.json.sig").read_bytes(), load_channel(), request["current"])
+        if release.setup:
+            check_setup_target(target)
+        else:
+            check_portable_folder(target)
         deadline = time.monotonic() + 180
         while process_alive(int(request["parent_pid"])):
             if time.monotonic() >= deadline:
@@ -212,8 +230,6 @@ def install(directory: Path, *, recover=False, launch=launch_application, health
             time.sleep(.25)
         if running_in(target):
             raise UpdateError("程序或文档后台仍在使用安装目录，请安全退出后重试。")
-        release = parse_manifest((directory / "update.json").read_bytes(),
-                                 (directory / "update.json.sig").read_bytes(), load_channel(), request["current"])
         if release.version == request["current"]:
             raise UpdateError("不允许重复安装当前版本。")
         from packaging.version import Version
@@ -221,10 +237,22 @@ def install(directory: Path, *, recover=False, launch=launch_application, health
             raise UpdateError("不允许通过更新安装旧版本。")
         if (target / "VERSION.txt").read_text(encoding="utf-8").splitlines()[0] != f"LinguaFloat v{request['current']}":
             raise UpdateError("当前目录版本已变化，请重新检查更新。")
-        archive = directory / "package.zip"
+        archive = directory / ('Setup.exe' if release.setup else 'package.zip')
         check_archive(archive, release)
         if shutil.disk_usage(target.parent).free < release.unpacked_size + 128 * 1024**2:
             raise UpdateError("安装盘空间不足，当前程序未更改。")
+        if release.setup:
+            result = subprocess.run([str(archive), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
+                                     '/SP-', '/NOCLOSEAPPLICATIONS', '/DIR=' + str(target),
+                                     '/LOG=' + str(directory / 'setup.log')], cwd=directory)
+            if result.returncode:
+                raise UpdateError(f'Setup 未完成（返回码 {result.returncode}），请查看安装日志。')
+            check_setup_target(target)
+            if (target / 'VERSION.txt').read_text(encoding='utf-8').splitlines()[0] != f'LinguaFloat v{release.version}':
+                raise UpdateError('Setup 结束，但原目录的版本不匹配，未启动程序。')
+            launch(target)
+            atomic_json(state_path, dict(phase='committed', target=str(target), version=release.version))
+            return
         staging = target.parent / (".LinguaFloat-stage-" + directory.name)
         backup = target.parent / "LinguaFloat-backups" / (f"v{request['current']}-" + directory.name)
         if staging.exists() or backup.exists():

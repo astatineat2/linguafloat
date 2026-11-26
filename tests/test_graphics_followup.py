@@ -127,3 +127,27 @@ def test_worker_graphics_publication_keeps_parent_and_tracks_link(tmp_path, monk
         assert (folder/'body.pdf').read_bytes()==before
         assert load_body_artifact(result['graphics_source'])['parent_job_id']=='body-parent'
     finally:store.close()
+
+
+def test_bilingual_only_child_exports_its_own_supplement(tmp_path, monkeypatch):
+    from linguafloat.document_worker import execute
+    from linguafloat.document_export import export_file
+    original,folder=artifact(tmp_path)
+    original=replace(original,mono=False)
+    mp=folder/'manifest.json'; m=json.loads(mp.read_bytes()); m['mono']=False
+    layout=folder/'export-layout.json'; layout.write_text('{}'); m['export_layout_sha256']=digest(layout)
+    mp.write_text(json.dumps(m),'utf8')
+    store=JobStore(tmp_path/'isolated.sqlite'); register(store,original,folder)
+    job=replace(original,workflow='graphics',parent_job_id=original.job_id,job_id='child-supp',graphics_source=str(folder),translate_figures=True)
+    def apply(source,target,*args):
+        target.insert_text((30,100),'Supplement only'); return []
+    monkeypatch.setattr('linguafloat.document_graphics.apply_graphics',apply)
+    t=NS(job=job,control=JobControl(),graphic_context=GraphicContext(),set_source_context=lambda _:None,calls=0,hits=0)
+    events=[]
+    try:
+        execute(job,'',store,t.control,events.append,t)
+        result=next(e for e in events if e['type']=='finished'); assert len(result['outputs'])==1
+        export_file(job.job_id,result,'markdown',tmp_path/'child.md')
+        assert 'Supplement only' in (tmp_path/'child.md').read_text('utf8')
+        with f.open(folder/'body.pdf') as pdf: assert 'Supplement only' not in pdf[0].get_text()
+    finally:store.close()

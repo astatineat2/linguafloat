@@ -185,6 +185,20 @@ def split_source_columns(page, source_lines):
     return changes
 
 
+def protected_pdf_box(area, height):
+    if 'pdf_box' in area:
+        return tuple(area['pdf_box'])
+    x0,y0,x1,y1=area['box']
+    return (x0,height-y1,x1,height-y0)
+
+
+def source_graphic_area(page, area):
+    """Map displayed detector coordinates back to the native PDF before applying IL masks."""
+    import pymupdf as f
+    matrix=page.transformation_matrix * page.rotation_matrix
+    return dict(area,pdf_box=list(f.Rect(area['box']) * ~matrix))
+
+
 def exclude_graphic_glyphs(page, areas):
     """Remove protected source glyphs before requests, not whole mixed blocks.
 
@@ -197,7 +211,7 @@ def exclude_graphic_glyphs(page, areas):
     from babeldoc.format.pdf.document_il import Box, PdfParagraphComposition
     from linguafloat.document_scientific import composition_chars
     height = page.cropbox.box.y2-page.cropbox.box.y
-    boxes = [Box(r["box"][0], height-r["box"][3], r["box"][2], height-r["box"][1]) for r in areas]
+    boxes = [Box(*protected_pdf_box(r,height)) for r in areas]
     rebuilt = []
     for paragraph in page.pdf_paragraph:
         pieces, touched = [], False
@@ -254,7 +268,7 @@ def split_caption_groups(page, words):
         if (abs((a.y+a.y2-b.y-b.y2)/2) > size*.28 or
                 not -.35 <= b.x-a.x2 <= size*.8):
             return False
-        return any(re.fullmatch(r'[A-Za-z]{2,}', word) and
+        return any(re.fullmatch(r'[A-Za-z][A-Za-z0-9-]+', word) and
                    w[0]+.4 < min(a.x2,b.x) <= max(a.x2,b.x) < w[2]-.4 and
                    w[1] <= (b.y+b.y2)/2 <= w[3] for word,w in words)
 
@@ -273,7 +287,29 @@ def split_caption_groups(page, words):
             if any(boundary(p,a) or boundary(a,p) for a in anchors):
                 linked.append(p)
         if linked and len(prefixes) <= 1 and (prefixes or marker.match(first.unicode or '')):
-            groups.append((first, [*anchors, *linked, *(p for p in prefixes if p not in linked)]))
+            group = [*anchors, *linked, *(p for p in prefixes if p not in linked)]
+            left = min(p.box.x for p in group)
+            for p in fallback:
+                if (p in group or p.xobj_id != first.xobj_id or abs(p.pdf_style.font_size-size) > .35
+                        or (p.unicode or '').strip().lower() not in {'or','and'}):
+                    continue
+                b = p.box
+                if not any(abs(a.box.y+a.box.y2-b.y-b.y2) <= size*.56 and
+                           -.35 <= b.x-a.box.x2 <= size*.8 for a in group):
+                    continue
+                def backed(run):
+                    box = run.box
+                    row = sorted((w[0],word) for word,w in words if box.x-.5 <= (w[0]+w[2])/2 <= box.x2+.5
+                                 and abs(w[1]+w[3]-box.y-box.y2) <= size*.8)
+                    return ''.join(word for _,word in row) == ''.join((run.unicode or '').split())
+                if not backed(p):
+                    continue
+                wraps = [r for r in fallback if r not in group and r.xobj_id==p.xobj_id
+                         and abs(r.pdf_style.font_size-size)<=.35 and abs(r.box.x-left)<=size*.5
+                         and size*.65 < b.y-r.box.y < size*2 and backed(r)]
+                if len(wraps)==1:
+                    group.extend((p,wraps[0]))
+            groups.append((first, group))
     owners = Counter(id(p) for _, group in groups for p in group)
     return [(first, group) for first, group in groups if all(owners[id(p)] == 1 for p in group)]
 

@@ -473,3 +473,9 @@ class BabelDOCFontPolicy:
 # Function-style entry point for ExitStack/callers that prefer context managers.
 def font_policy(chinese="", latin="", *, fonts_dir=None):
     return BabelDOCFontPolicy(chinese, latin, fonts_dir=fonts_dir)
+def keep_mapped_spaces(make_cmap):
+    """A space has an advance but no outline; retain its original Unicode."""
+    def build(mapping, outlines):
+        spaces = {gid for gid, value in mapping.items() if value in (0x20,0xA0,0x202F)}
+        return make_cmap(mapping, sorted(set(outlines) | spaces))
+    return build

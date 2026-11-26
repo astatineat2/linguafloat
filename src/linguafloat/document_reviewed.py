@@ -18,6 +18,8 @@ def local_review(store, digest):
 
 def reviewed_pages(store,digest,job):
     manifest,home=local_review(store,digest)
+    if getattr(job,'workflow',None)=='body' and not getattr(job,'translate_tables',False) and manifest.get('table_policy')!='preserve-tables-v1':
+        return {}  # A legacy reviewed page may already have translated its tables.
     key='/'.join(str(getattr(job,name,'')) for name in ('target','chinese_font','latin_font'))
     result={}
     for number,checksum in manifest.get('page_sets',{}).get(key,{}).items():

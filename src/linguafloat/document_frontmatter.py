@@ -19,8 +19,30 @@ def plan_frontmatter(page):
     center = (left+right)/2
     affiliations = [l for l in lines if l["box"][1] < page.rect.height*.27
                     and re.match(r"^[1-9]\s*[A-Za-z]", l["text"])
-                    and re.search(r"\b(Department|Institute|University|Laborator|School|Center|Centre)", l["text"], re.I)
-                    and abs((l["box"][0]+l["box"][2])/2-center) < 8]
+                    and re.search(r"\b(Department|Institute|University|Laborator|School|Center|Centre)", l["text"].lstrip('0123456789 '), re.I)]
+    affiliations.sort(key=lambda l:l['box'][1])
+    groups=[]
+    if len(affiliations)>=2:
+        nums=[int(re.match(r'\d+',l['text'])[0]) for l in affiliations]
+        aligned=all(abs(l['box'][0]-affiliations[0]['box'][0])<3 for l in affiliations)
+        centered=all(abs((l['box'][0]+l['box'][2])/2-center)<8 for l in affiliations)
+        if nums==list(range(1,len(nums)+1)) and (aligned or centered):
+            ordered=sorted(lines,key=lambda l:l['box'][1]); starts=[ordered.index(l) for l in affiliations]
+            for i,k in enumerate(starts):
+                group=dict(ordered[k]);end=starts[i+1] if i+1<len(starts) else len(ordered)
+                for row in ordered[k+1:end]:
+                    rect=fitz.Rect(row['box']);prev=fitz.Rect(group['box']);height=fitz.Rect(ordered[k]['box']).height
+                    if (not -1.5<=rect.y0-prev.y1<=height*.65 or abs(rect.x0-prev.x0)>3
+                            or re.match(r'^[*#\d]|https?://',row['text']) or '@' in row['text']
+                            or abs(rect.height-height)>2 or (i+1==len(starts) and not group['text'].rstrip().endswith((',', ' of',' and')))):
+                        if i+1<len(starts):groups=[];break
+                        break
+                    group=dict(text=group['text']+' '+row['text'],box=list(prev|rect),spans=group['spans']+row['spans'])
+                else:
+                    groups.append(group);continue
+                if i+1<len(starts):break
+                groups.append(group)
+    affiliations=groups
     plans = []
     if len(affiliations) >= 2:
         first = min(l["box"][1] for l in affiliations)
@@ -32,7 +54,8 @@ def plan_frontmatter(page):
             plans.append(dict(kind="authors", box=[left, l["box"][1]-1, right, l["box"][3]+1], lines=[l]))
         top, bottom = min(l["box"][1] for l in affiliations), max(l["box"][3] for l in affiliations)
         next_y = min((l["box"][1] for l in lines if l["box"][1] > bottom+1), default=bottom+5)
-        plans.append(dict(kind="affiliations", box=[left, top-1, right, min(next_y-2, bottom+5)],
+        prev_y=max((l['box'][3] for l in lines if l['box'][3]<top),default=top-2)
+        plans.append(dict(kind="affiliations", box=[left, max(top-1,(prev_y+top)/2), right, min((next_y+bottom)/2,bottom+5)],
                           lines=sorted(affiliations, key=lambda l:l["box"][1])))
     copyright_lines = [l for l in lines if l["box"][1] > page.rect.height*.85 and "©" in l["text"]
                        and re.search(r"permission|copyright|reserved", l["text"], re.I)]
@@ -167,7 +190,8 @@ def repair_frontmatter(source, page, translator):
         page.add_redact_annot(rect,fill=False,cross_out=False)
         page.apply_redactions(images=0,graphics=0,text=0)
         if fitted is None:
-            page.show_pdf_page(rect,source.parent,source.number,clip=rect)
+            from linguafloat.document_clip import show_source_region
+            show_source_region(page,rect,source.parent,source.number)
         else:
             with fitz.open(stream=fitted[0],filetype="pdf") as overlay:
                 page.show_pdf_page(page.rect,overlay,0)

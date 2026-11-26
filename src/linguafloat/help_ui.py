@@ -27,8 +27,7 @@ from linguafloat.update_core import (UpdateError, atomic_json, check_latest, dow
 
 GUIDE = """
 <h2>开始使用 LinguaFloat</h2>
-<p>解压完整便携 ZIP 后启动 <b>LinguaFloat.exe</b>。无需安装 Python；不要移动或删除
-<code>_internal</code>、<code>document-runtime</code> 和更新助手。</p>
+<p>运行 Windows x64 Setup 安装程序，再从开始菜单打开 LinguaFloat。以后从“帮助与更新”更新；卸载时先退出程序，再点击开始菜单里的“卸载 LinguaFloat”。无需安装 Python。</p>
 <h3>1 · 添加翻译服务</h3>
 <p>首次启动可在“配置翻译服务”单页选择服务、填写 API Key 和模型，点击“完成并保存”后启用；
 也可“跳过，稍后配置”，后续从“配置设置 → 添加供应商”继续添加。保存和跳过后不会再次自动弹出。</p>
@@ -54,7 +53,7 @@ Responses、Chat Completions、Anthropic Messages 或 Gemini generateContent。�
 游戏模式仅保留区域翻译。<br>
 <b>文件翻译：</b>添加 PDF、Word 或 PPTX，选择输出目录和输出选项，再开始。
 文件翻译跟随当前供应商及模型；已启动任务保留原配置快照。
-保留版式 PDF 的独立表格随正文默认翻译；图内文字保留原文，正文完成后从底部“图片翻译”按需补译。
+保留版式 PDF 首次翻译正文和独立题注；图片与表格内部保留原文。完成后使用“图表翻译”按需补译并另存。
 图片结果编号另存，不覆盖正文或旧结果。旧任务未译表格不会因图片补译而自动处理。</p>
 <h3>3 · PDF 与 OCR 资源</h3>
 <p>屏幕 OCR 模型随完整包提供。首次 PDF 处理可能需要联网下载缺失的布局模型、字体等资源，
@@ -70,7 +69,7 @@ API Key 使用 Windows 凭据管理器或指定的环境变量，不放进软件
 <p><b>快捷键无效：</b>检查是否被其他程序占用，并查看监听错误。<br>
 <b>API 调用失败：</b>核对地址、接口模式、模型权限和账户余额；具体错误显示在界面中。<br>
 <b>无法保存：</b>选择当前用户可写的输出目录。<br>
-<b>OCR 或 PDF 资源缺失：</b>使用完整便携包，并检查资源下载网络。<br>
+<b>OCR 或 PDF 资源缺失：</b>检查安装是否完整及资源下载网络。<br>
 <b>系统提示未知发布者：</b>当前版本未做 Windows 程序签名，请从项目正式发布页下载并核对校验值；
 不需要关闭安全软件。</p>
 <h3>更新</h3>
@@ -311,7 +310,7 @@ class HelpController(QObject):
         if self.busy or self.release is None or self.install_pending:
             return
         if not getattr(sys, "frozen", False):
-            self.dialog.status.setText("源码运行模式不能替换程序，请在完整便携版中更新。")
+            self.dialog.status.setText("源码运行模式不能替换程序，请在 Setup 安装版中更新。")
             return
         self.cancelled.clear()
         self.started = time.monotonic()
@@ -358,8 +357,10 @@ class HelpController(QObject):
                 self.cancel_action()
                 return
             target = Path(sys.executable).resolve().parent
-            from linguafloat.update_install import check_portable_folder
-            check_portable_folder(target)
+            from linguafloat.update_install import check_setup_target
+            if not self.release.setup:
+                raise UpdateError('安装版只接受已签名清单中的 Windows Setup，不会用 ZIP 替换当前安装。')
+            check_setup_target(target)
             helper = target / "LinguaFloatUpdater.exe"
             cache = json.loads((update_directory() / "release-cache.json").read_text(encoding="utf-8"))
             payload, signature = base64.b64decode(cache["payload"]), cache["signature"].encode("ascii")

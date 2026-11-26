@@ -61,12 +61,48 @@ def test_formula_placeholders_must_keep_order_count_and_spelling():
         assert not check_formula_tokens(ti, text)
 
 
+def test_microscopic_word_space_is_not_a_formula_or_style_anchor():
+    from babeldoc.format.pdf.document_il import Box, PdfCharacter, PdfParagraph, PdfParagraphComposition as Part, PdfStyle, PdfLine
+    from linguafloat.document_richtext import restore_source_styles, styled_translate_input
+    body = PdfStyle(font_id='body', font_size=9)
+    micro = PdfStyle(font_id='spacer', font_size=.001)
+    script = PdfStyle(font_id='body', font_size=5)
+    chars = [PdfCharacter(box=Box(i*5, 30, i*5+5, 36), pdf_style=style,
+                          char_unicode=c, pdf_character_id=idx)
+             for i, (c, style, idx) in enumerate([('o', body, 21), ('f', body, 22), (' ', micro, 1),
+                                                  ('t', body, 23), ('o', body, 24), ('2', script, 32)])]
+    p = PdfParagraph(pdf_style=body, unicode='of to2', pdf_paragraph_composition=[Part(pdf_line=PdfLine(pdf_character=chars))])
+    protect_math(p, {})
+    anchors = [part.pdf_formula for part in p.pdf_paragraph_composition if part.pdf_formula]
+    assert not any(chars[2] in a.pdf_character for a in anchors)
+    assert any(chars[-1] in a.pdf_character for a in anchors)
+    restore_source_styles(NS(pdf_paragraph=[p]))
+    from babeldoc.format.pdf.document_il.midend.il_translator import FormulaPlaceholder
+    engine = NS(process_formula=lambda f,i,p: FormulaPlaceholder(i,f,'{v1}',''))
+    value = styled_translate_input(engine, p, lambda *a: None)
+    assert value.unicode.startswith('of to') and len(value.placeholders) == 1
+
+
 def test_journal_prefixes_never_enter_translated_title():
     for journal in ("N. J. Phys.", "SciPost Phys.", "ACS Nano", "Nano Lett.", "Adv. Mater."):
         text = f"Fert, A. Magnetic textures and their motion. {journal} 12, 233 (2024)."
         prefix, title, suffix = reference_title(text)
         assert title == "Magnetic textures and their motion."
         assert suffix == f" {journal} 12, 233 (2024)."
+
+
+def test_email_wrap_measures_the_whole_address_not_just_the_first_word():
+    from linguafloat.document_layout import keep_email_units_together, emails_fit_lines
+    address = 'reader+test@science.example.org'
+    units = [NS(try_get_unicode=lambda c=c:c, can_break_line_cache=None) for c in ' '+address+' ']
+    addresses = keep_email_units_together(units)
+    for u in units:
+        u._lf_line_y = 60
+    assert emails_fit_lines(units, addresses)
+    units[1]._lf_line_y = 70
+    assert not emails_fit_lines(units, addresses)
+    assert all(u.can_break_line_cache is False for u in units[1:-1])
+    assert units[0].can_break_line_cache is units[-1].can_break_line_cache is None
 
 
 def test_formula_merge_preserves_fraction_geometry_and_curve():

@@ -161,8 +161,16 @@ def join_partial_scientific_tokens(paragraph):
     quantity = (number + r'(?:[\u2212\u2013-]' + number + r')?[%\uff05]?'
                 r'(?![0-9_]|\.\d|[eE][-+\u2212]?\d|[\u2212\u2013-]\d)')
     pattern = r'(?<![A-Za-z0-9_.])(?:' + identifier + '|' + quantity + ')'
+    # The exceptional case is a single native slot straddling two partial
+    # decimals. Do not re-tokenize intact uncertainty values in old caches.
+    broken_centres = {a for part,(a,b) in zip(atoms,offsets) if part.pdf_formula and
+                      re.fullmatch(r'\d+\s*±\s*\d+',text[a:b]) and text[:a].endswith('.') and
+                      re.match(r'\.\d',text[b:])}
+    compound = [m for m in re.finditer(r'(?<![A-Za-z0-9_.])'+number+r'\s*±\s*'+number+r'(?![0-9_.])',text)
+                if any(m.start()<a<m.end() for a in broken_centres)] if broken_centres else []
+    matches = [m for m in re.finditer(pattern,text) if not any(c.start()<m.end() and m.start()<c.end() for c in compound)]
     groups = []
-    for match in re.finditer(pattern, text):
+    for match in sorted(matches + compound,key=lambda m:m.start()):
         members = {i for i, (a, b) in enumerate(offsets) if a < match.end() and b > match.start()}
         formulas = [i for i in members if atoms[i].pdf_formula]
         if not formulas or len(members) <= 1:
@@ -175,7 +183,12 @@ def join_partial_scientific_tokens(paragraph):
             unit_tail = (after in {'μ', 'µ'} and a > match.start() and
                          re.fullmatch(r'[-+−]?\d+\.\d+', match[0]) and
                          re.fullmatch(r'\d+', text[a:match.end()]))
-            return before or (after and not unit_tail)
+            # A formula can own the equals sign and just the integral part.
+            # Complete the decimal in situ; never absorb a larger equation.
+            assignment = (before == '=' and not after and
+                          re.fullmatch(r'[-+−]?\d+\.\d+', match[0]) and
+                          re.fullmatch(r'[-+−]?\d+', text[match.start():b]))
+            return (before and not assignment) or (after and not unit_tail)
 
         if any(spills_outside_token(i) for i in formulas):
             continue  # Never split a larger pre-existing equation to complete a token.
@@ -263,7 +276,11 @@ def protect_math(paragraph, fonts):
         cursor += length
     base_size = paragraph.pdf_style.font_size if paragraph.pdf_style else 0
     for c in chars:
-        if c.pdf_style and base_size and c.pdf_style.font_size < base_size * .8:
+        # Some publishers paint a microscopic ASCII space between every word.
+        # Its size alone is not evidence of a subscript. Existing formula runs
+        # (including their internal spaces) are not part of this pass.
+        if (c.pdf_style and base_size and c.pdf_style.font_size < base_size * .8
+                and c.char_unicode != ' '):
             protected.add(id(c))
     if not protected:
         paragraph.pdf_paragraph_composition = merge_formula_runs(compositions, base_size)
@@ -583,11 +600,59 @@ def merge_formula_runs(parts, size):
     return result
 
 
+def _enzyme_prefixes(translate_input):
+    anchors = {}
+    for p in translate_input.placeholders:
+        formula = getattr(p, 'formula', None)
+        if formula is None:
+            continue
+        glyphs = ''.join(c.char_unicode or '' for c in formula.pdf_character).strip()
+        if re.fullmatch(r'(?:[αβ]-)?[DL]-|[αβ]-', glyphs):
+            suffix = translate_input.unicode.partition(p.placeholder)[2]
+            if re.match(r'\s*[a-z]{3,}ase\b', suffix, re.I):
+                anchors[p.placeholder] = glyphs
+    return anchors
+
+
+def _starts_identifier(text):
+    return re.match(r'\s*[A-Za-z]{1,10}\d+[A-Za-z0-9]*\b', re.sub(r'<[^>]+>', '', text), re.ASCII) is not None
+
+
+def _split_crystal_head(source):
+    return re.match(r'^\s*(?:the\s+)?crystal structures? of\s*(?:the\s*)?$', re.sub(r'<[^>]+>', '', source), re.I)
+
+
+def _has_crystal_head(text):
+    clause=re.split(r'[。！？；;]', re.sub(r'<[^>]+>', '', text), maxsplit=1)[0]
+    return bool(re.search(r'晶[体體](?:学|學)?(?:三[维維])?[结結][构構]|晶[体體]中.{0,12}[结結][构構]',clause))
+
+
+def attach_measurement_nucleus(ti, text):
+    """Move an intact isotope slot with NMR when Chinese inverts 'spectrum of X'."""
+    if not isinstance(text,str) or 'NMR' not in text or '的' not in text:
+        return text
+    for ph in ti.placeholders:
+        formula=getattr(ph,'formula',None)
+        if not formula or not re.fullmatch(r'\s*\d{1,3}[A-Z][a-z]?\s*',''.join(c.char_unicode or '' for c in formula.pdf_character)):
+            continue
+        token=re.escape(ph.placeholder)
+        source=re.search(token+r'\s*NMR\s+(?:spectrum|spectra)\s+of\s+([A-Za-z][\w-]*)(?=[,.;:)\s]|$)',ti.unicode)
+        if source:
+            text=re.sub(token+r'\s*('+re.escape(source[1])+r'\s*的\s*)(?=NMR\b|NMR谱)',
+                        lambda m:m[1]+ph.placeholder,text)
+    return text
+
+
 def check_formula_tokens(translate_input, output):
     from babeldoc.format.pdf.document_il.midend.il_translator import FormulaPlaceholder
     tokens = [p.placeholder for p in translate_input.placeholders if isinstance(p, FormulaPlaceholder)]
     if not tokens:
         return True
+    if any(_starts_identifier(output.partition(t)[2]) for t in _enzyme_prefixes(translate_input)):
+        return False
+    if (re.search(r'[\u3400-\u9fff]',output) and _split_crystal_head(translate_input.unicode.partition(tokens[0])[0])
+            and not _has_crystal_head(output)):
+        return False
     pattern = re.compile("|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True)))
     unknown = set(re.findall(r"\{[vV]\d+\}", output)) - set(re.findall(r"\{[vV]\d+\}", translate_input.unicode))
     if unknown or pattern.findall(output) != pattern.findall(translate_input.unicode):
@@ -642,6 +707,46 @@ def prose_numbers(text):
                    for value, percent in re.findall(pattern, text))
 
 
+def missing_body_translation(source, output, target):
+    """Reject a complete unconverted English sentence, not names or scientific labels."""
+    if target not in ('zh-Hans','zh-Hant') or not isinstance(output,str):
+        return False
+    def visible(value):
+        return re.sub(r'<[^>]+>|\{[vV]\d+\}', ' ', value)
+    grammar = {'is','are','was','were','has','have','had','can','could','may','showed','suggest','found','used'}
+    def prose(s):
+        words=re.findall(r'[a-z]+',s.lower())
+        return (len(words)>=8 and bool(grammar.intersection(words)) and
+                bool({'the','a','an','of','in','that','for','with','this','we'}.intersection(words)))
+    source,output=visible(source),visible(output)
+    if not re.search(r'[\u3400-\u9fff]',output):
+        return prose(source)
+    # Chinese in a neighbouring sentence or on the other side of an anchor
+    # is not evidence that this complete source sentence was translated.
+    normalize=lambda s: ' '.join(s.casefold().split())
+    result=normalize(output)
+    return any(prose(s) and normalize(s) in result for s in re.split(r'(?<=[.!?])\s+',source))
+
+
+def _formula_quantities(value):
+    from linguafloat.document_context import scientific_quantities
+    return scientific_quantities(re.sub(r'(?<![A-Za-z0-9_])pH(?=[+−-]?\d)', 'pH ', value))
+
+
+def _numeric_difference(source, text, problem):
+    compare = {'片段正文数值发生变化': prose_numbers, '片段小数、百分比或数量级发生变化': _formula_quantities}.get(problem)
+    if not compare:
+        return ''
+    before, after = compare(source), compare(text)
+    def display(counts):
+        def number(v):
+            # Keep large exponents compact. Do not round via Decimal.normalize().
+            s=str(v)
+            return s.rstrip('0').rstrip('.') if '.' in s and 'E' not in s else s
+        return ', '.join(f'{number(v)[:40]}{"%" if pct else ""}×{n}' for (v,pct),n in list(counts.items())[:6]) or '无'
+    return f'原文有、候选缺：{display(before-after)}；候选多出：{display(after-before)}'
+
+
 def _formula_fragment_problem(source, text, tokens):
     if not isinstance(text, str):
         return "片段译文不是文字"
@@ -652,16 +757,40 @@ def _formula_fragment_problem(source, text, tokens):
     from linguafloat.document_richtext import style_structure_matches
     if not style_structure_matches(source, text, fragments=True):
         return "片段格式标签丢失、增加或嵌套关系变化"
-    from linguafloat.document_context import scientific_quantities
-    def quantities(value):
-        # pH is a label, not an identifier prefix. Typeset translations may
-        # omit its separating space; the signed reading must still be counted.
-        return scientific_quantities(re.sub(r'(?<![A-Za-z0-9_])pH(?=[+−-]?\d)', 'pH ', value))
-    if quantities(source) != quantities(text):
+    if _formula_quantities(source) != _formula_quantities(text):
         return "片段小数、百分比或数量级发生变化"
     if prose_numbers(source) != prose_numbers(text):
         return "片段正文数值发生变化"
+    if missing_plural_identifiers(source,text):
+        return "片段中的科学缩写缺失"
+    if lost_elevated_comparison(source,text):
+        return "比较分句中显著升高的限定或方向缺失"
+    # A following immutable slot may carry the closing parenthesis. Text
+    # moved after the open acronym would then be read *inside* that name.
+    suffix=re.search(r'[（(]\s*([A-Z]{2,}(?:[-/][A-Z0-9]+)*)\s*$',re.sub(r'<[^>]+>','',source))
+    if suffix and not re.search(r'[（(]\s*'+re.escape(suffix[1])+r'\s*$',re.sub(r'<[^>]+>','',text)):
+        return "片段末尾括号内的科学缩写错位"
     return ""
+
+
+def lost_elevated_comparison(source, output):
+    # The first statistical result must not borrow the qualifier of a later comparison.
+    plain=lambda s: re.sub(r'<[^>]+>', '', s)
+    first=re.split(r'\b(?:and (?:demonstrated|showed)|although)\b|[.;](?!\d)',plain(source),maxsplit=1,flags=re.I)[0]
+    if not re.match(r'\s*Compared (?:with|to)\b',first,re.I) or not re.search(r'\bsignificantly (?:elevated|increased|higher)\b',first,re.I) or not re.search(r'[\u3400-\u9fff]',output):return False
+    clause=re.split(r'[。；]|[，,]\s*(?:且|并且|并|而且)(?=[^。；]{0,30}(?:相比|高于|比较|相较))',plain(output),maxsplit=1)[0]
+    return not (re.search(r'显著|明显|统计学',clause) and re.search(r'高|升|增',clause))
+
+
+def plural_identifiers(source):
+    return sorted(set(re.findall(r'(?<![A-Za-z0-9])([A-Z]{2,})s(?![A-Za-z0-9])',source)))
+
+
+def missing_plural_identifiers(source, output):
+    # Plural scientific abbreviations can also be rendered in singular form
+    # in Chinese. Do not confuse plural -s with lowercase letters in a name.
+    terms = plural_identifiers(source)
+    return any(not re.search(r'(?<![A-Za-z0-9])'+term+r's?(?![A-Za-z0-9])',output) for term in terms)
 
 
 def _formula_reply(response, fragments):
@@ -681,6 +810,58 @@ def _formula_reply(response, fragments):
     return values
 
 
+def _translate_label_sentences(ti, translator, budget):
+    """Translate prose around short inline labels without cutting through its clauses."""
+    if getattr(getattr(translator,'job',None),'target',None) not in ('zh-Hans','zh-Hant') or '<' in ti.unicode:
+        return None
+    tags={}; raw=ti.unicode
+    for i,p in enumerate(ti.placeholders,1):
+        formula=getattr(p,'formula',None)
+        if not formula or raw.count(p.placeholder)!=1: return None
+        label=''.join(c.char_unicode or '' for c in formula.pdf_character).strip()
+        if not re.fullmatch(r'[A-Za-z0-9α-ωΑ-Ω+−,./%-]{1,16}',label):return None
+        tags[p.placeholder]=f'<k{i}>{label}</k{i}>'
+    if len(tags)<3 or not re.search(r'\{[vV]\d+\}\s*[A-Za-z]{1,8}\s*\{[vV]\d+\}',raw):return None
+    sentences=re.split(r'(?<=[.!?])\s+(?=(?:[A-Z][a-z]+\d+|The|This|These|Those|It|We|They|Its|In|A|An|However|Thus|Removing|Significantly)\b)',raw)
+    slots=re.compile(r'\{[vV]\d+\}')
+    def mark(s):
+        return re.sub(r'\{[vV]\d+\}',lambda m:tags.get(m[0],m[0]),s)
+    packet=[dict(id=i,input=mark(s),slots=[tags[t] for t in slots.findall(s)]) for i,s in enumerate(sentences)]
+    msgs=translator.messages('');msgs[0]['content']+=(
+        ' Translate WHOLE sentences into faithful Chinese; all predicates, objects, qualifications and identifiers must survive. '
+        'Return a JSON array of {id,output}, where output is an ARRAY of Chinese strings. '
+        'The page already supplies every scientific label in the listed slots, in that fixed order. '
+        'Write the prose before, between and after them. With n slots return exactly n+1 strings (empty is OK); '
+        'with no slots return one complete translation. Never output tags or reproduce a slot in your strings. '
+        'Compose the whole sentence together, not each gap independently. Rephrase using a following clause when '
+        'needed to keep the fixed labels attached to the correct scientific entities. Never shorten to fit.')
+    msgs[1]['content']=json.dumps(dict(sentences=packet),ensure_ascii=False)
+    # A miss on this optional route is not a failed paragraph. Only enter
+    # the guarded request path for a cache hit or an online translation.
+    if translator.job.relayout_only and translator.store.get(translator.cache_key(msgs)) is None:
+        return None
+    reply=translator.request(msgs,budget=budget,part='完整句内科学标识补译')
+    try:
+        values=_formula_reply(reply,packet);out=[]
+        for i,s in enumerate(sentences):
+            gaps=values[i]; anchors=slots.findall(s)
+            if not isinstance(gaps,list) or len(gaps)!=len(anchors)+1 or not all(isinstance(g,str) for g in gaps):raise ValueError
+            prose=' '.join(gaps)
+            if not re.search(r'[\u3400-\u9fff]',prose) or slots.search(prose) or re.search(r'</?[A-Za-z][^>]*>',prose):raise ValueError
+            v=gaps[0]+''.join(t+g for t,g in zip(anchors,gaps[1:]))
+            strip=lambda q:slots.sub(' ',q)
+            if _formula_fragment_problem(strip(s),prose,[]):raise ValueError
+            ids=r'(?<![a-zA-Z0-9])[a-zA-Z]{2,}\d+[a-zA-Z0-9]*'
+            if sorted(re.findall(ids,strip(v)))!=sorted(re.findall(ids,strip(s))):raise ValueError
+            out.append(v.strip())
+        result=''.join(out)
+        if not check_formula_tokens(ti,result):raise ValueError
+        return result
+    except ValueError:
+        if getattr(translator,'store',None) is not None:translator.store.discard(translator.cache_key(msgs))
+        return None
+
+
 def translate_formula_segments(translate_input, translator):
     """Reconstruct immutable formulas around translated, explicitly keyed prose."""
     from babeldoc.format.pdf.document_il.midend.il_translator import FormulaPlaceholder
@@ -688,10 +869,25 @@ def translate_formula_segments(translate_input, translator):
     tokens = [p.placeholder for p in translate_input.placeholders if isinstance(p, FormulaPlaceholder)]
     pattern = "(" + "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True)) + ")" if tokens else None
     pieces = re.split(pattern, translate_input.unicode) if pattern else [translate_input.unicode]
+    # Some native formula runs include both the fraction and its unit. Keep
+    # the integer and decimal point out of the model's movable prose.
+    fixed_tails={}
+    native_fractions={p.placeholder for p in translate_input.placeholders if isinstance(p,FormulaPlaceholder)
+                      and p.formula and re.match(r'^\s*\d+\s*(?:cm|mm|nm|ppm|mg|mL|µm|μm)\b',
+                      ''.join(c.char_unicode or '' for c in p.formula.pdf_character))}
+    for i in range(1,len(pieces),2):
+        tail=re.search(r'(?<![A-Za-z0-9_.])[-+−]?\d+\.$',pieces[i-1])
+        if pieces[i] in native_fractions and tail:
+            fixed_tails[i-1]=tail[0]
+            pieces[i-1]=pieces[i-1][:tail.start()]
     fragments = [dict(id=i, input=text) for i, text in enumerate(pieces)
                  if i % 2 == 0 and re.search(r"[A-Za-z]{2,}|[\u3400-\u9fff]", re.sub(r"<[^>]+>", "", text))]
     if not fragments:
         return translate_input.unicode
+    budget = [max(0, min(3, int(getattr(translator, "retries", 0))))]
+    complete = _translate_label_sentences(translate_input, translator, budget)
+    if complete is not None:
+        return complete
     messages = translator.messages("")
     messages[0]["content"] += (
         " Formula-segment repair v2. Return a JSON array of {id, output} objects, one for every fragment."
@@ -702,9 +898,19 @@ def translate_formula_segments(translate_input, translator):
         " Fragments may begin or end with incomplete sentences."
         " Do not translate or output context. Do not add explanations or Markdown fences.")
     messages[1]["content"] = json.dumps(dict(fragments=fragments, context=translate_input.unicode), ensure_ascii=False)
-    # Content recovery shares the transport retry budget: malformed responses
-    # must not create another independently replenished retry loop.
-    budget = [max(0, min(3, int(getattr(translator, "retries", 0))))]
+    constraints=[]
+    for item in fragments:
+        terms=plural_identifiers(item['input'])
+        if terms: constraints.append(f"Fragment {item['id']}: retain the literal abbreviations {', '.join(terms)} even when expanding their names.")
+        counts=prose_numbers(item['input'])
+        if any(percent for _,percent in counts) or sum(counts.values())>=4:
+            expected=', '.join(f'{n}{"%" if pct else ""} ({count}x)' for (n,pct),count in counts.items())
+            constraints.append(f"Fragment {item['id']}: check numeric values and occurrence counts: {expected}. Keep digits, signs and percentages within the same statement; do not translate numerals into words or copy this checklist.")
+        if re.search(r'\bsignificantly (?:elevated|increased|higher)\b',item['input'],re.I):
+            constraints.append(f"Fragment {item['id']}: explicitly translate the direction and significance for each comparator; do not move either to a later clause.")
+    if constraints: messages[0]['content']+=' '+' '.join(constraints)
+    # Both allowances are per paragraph, never replenished for each fragment.
+    content_left = max(0, min(3, int(getattr(translator, 'content_repairs', 2))))
     store = getattr(translator, "store", None)
     control = getattr(translator, "control", None)
     recovered = False
@@ -717,19 +923,22 @@ def translate_formula_segments(translate_input, translator):
         if store is not None:
             store.discard(translator.cache_key(request))
 
+    evidence = ''
     def stop(reason):
         location = getattr(translator, "location", "文档")
-        raise DocumentError(f"[公式旁文字补译失败] {location}：{reason}。未改动原公式，未发布不完整译文。"
+        error = DocumentError(f"[公式旁文字补译失败] {location}：{reason}。未改动原公式，未发布不完整译文。"
                             "已有合格译文缓存保留。")
+        error.fragment_evidence = evidence
+        raise error
 
     def reserve(reason):
-        nonlocal recovered
+        nonlocal recovered, content_left
         checkpoint()
         if getattr(getattr(translator, "job", None), "relayout_only", False):
             stop(reason + "；仅重新排版不会发送补译请求")
-        if budget[0] <= 0:
-            stop(reason + "；当前重试额度已用尽")
-        budget[0] -= 1
+        if content_left <= 0:
+            stop(reason + "；内容纠错额度已用尽")
+        content_left -= 1
         recovered = True
 
     while True:
@@ -742,10 +951,51 @@ def translate_formula_segments(translate_input, translator):
             discard(messages)
             reserve(str(exc))
 
-    problems = {item["id"]: _formula_fragment_problem(item["input"], values[item["id"]], tokens)
+    anchors = _enzyme_prefixes(translate_input)
+    split_head = (len(pieces)>2 and _split_crystal_head(pieces[0]) and
+                  getattr(getattr(translator,'job',None),'target',None) in ('zh-Hans','zh-Hant'))
+    def problem_for(item, value):
+        reason = _formula_fragment_problem(item['input'], value, tokens)
+        if not reason and missing_body_translation(item['input'],value,getattr(getattr(translator,'job',None),'target',None)):
+            reason='正文片段仍为原文'
+        index = item['id']
+        if not reason and index and pieces[index-1] in anchors and _starts_identifier(value):
+            return '构型前缀后误接了编号而非酶名'
+        if (not reason and split_head and index==2 and isinstance(values.get(0),str)
+                and not _has_crystal_head(values[0]+value)):
+            return '跨公式重组后遗漏了晶体结构主语'
+        return reason
+    problems = {item["id"]: problem_for(item, values[item["id"]])
                 for item in fragments}
     if any(problems.values()):
         discard(messages)
+    rejected = [item for item in fragments if problems[item['id']]]
+    if len(rejected)>1 and content_left and not getattr(getattr(translator,'job',None),'relayout_only',False):
+        packet=[]
+        for item in rejected:
+            i=item['id']; why=problems[i]
+            rule=_numeric_difference(item['input'],values[i],why) or why
+            if i and pieces[i-1] in anchors:
+                rule+='；前置 '+anchors[pieces[i-1]]+' 修饰酶名，勿接编号。'
+            if split_head and i==2 and not _has_crystal_head(values[0] if isinstance(values.get(0),str) else ''):
+                rule+='；该实体的晶体结构是主语，应在实体名后译出。'
+            packet.append(dict(item,check=rule))
+        group=translator.messages('')
+        group[0]['content']+=(' Correct ONLY the listed fragments. Return one JSON array of {id,output}; '
+            'do not alter IDs. Keep scientific values, grammatical relations, style and all descriptive clauses. '
+            'Do not copy placeholders. Context is read-only. The check field is a correction instruction, not text to translate.')
+        group[1]['content']=json.dumps(dict(fragments=packet,context=translate_input.unicode[:6000]),ensure_ascii=False)
+        reserve('不合格片段定向纠错')
+        response=translator.request(group,budget=budget,part='公式间文字补译 · 不合格片段组')
+        checkpoint()
+        try:
+            replacements=_formula_reply(response,rejected)
+        except ValueError:
+            discard(group)  # Never guess how malformed IDs map back to the paragraph.
+        else:
+            values.update(replacements)
+            problems.update((item['id'],problem_for(item,values[item['id']])) for item in rejected)
+            if any(problems.values()): discard(group)
     for item in fragments:
         identity, source = item["id"], item["input"]
         problem = problems[identity]
@@ -755,27 +1005,46 @@ def translate_formula_segments(translate_input, translator):
         # other validated fragments never leave their original positions.
         single = translator.messages("")
         single[0]["content"] += (
-            " Formula-segment single repair v1. The user JSON contains fragment and reference-only context."
+            " Formula-segment single repair v3. The user JSON contains fragment and reference-only context."
             " Translate only fragment as plain text, not JSON. Keep its grammatical role and every style tag."
             " Context is not a translation target. Never copy any formula placeholders from context."
             " Do not move, add or omit words to complete the surrounding sentence."
+            " Include the measured entity, its abbreviation and quantity even in a passive construction."
+            " When the fragment ends with an unclosed parenthesized acronym, leave it at the very end;"
+            " put the measured entity before the method. The closing parenthesis belongs to the next slot."
             " Return nonempty translated text without explanations or Markdown fences.")
         single[1]["content"] = json.dumps(dict(fragment=source, context=translate_input.unicode[:6000]), ensure_ascii=False)
+        if identity and pieces[identity-1] in anchors:
+            single[0]['content'] += (' The preceding immutable prefix '+anchors[pieces[identity-1]]+
+                ' modifies the enzyme name at the beginning of this fragment. Begin with that enzyme name, not its identifier. Do not repeat the prefix.')
+        if split_head and identity==2 and not _has_crystal_head(values[0]):
+            single[0]['content'] += (' Chinese word order places the head noun from the preceding fragment after its modifier. '
+                'Keep the crystal structure of the named entity as the subject, not the entity alone. Include 晶体结构 (or 晶體結構) in its first sentence.')
+        if constraints: single[0]['content']+=' '+' '.join(c for c in constraints if c.startswith(f'Fragment {identity}:'))
+        text = values[identity]
         while problem:
+            diff = _numeric_difference(source, text, problem)
+            evidence = f'片段 {identity}'+('；'+diff if diff else '')
             reserve(f"片段 {identity}：{problem}")
+            if diff:
+                single[1]['content'] = json.dumps(dict(fragment=source, context=translate_input.unicode[:6000], numeric_check=diff),ensure_ascii=False)
             text = translator.request(single, budget=budget, part=f"公式间文字补译 · 片段 {identity}")
             checkpoint()
-            problem = _formula_fragment_problem(source, text, tokens)
+            problem = problem_for(item, text)
             if not problem and text.lstrip().startswith(("```", '[{', '{"')):
                 problem = "单片段补译未返回纯文本"
             if problem:
                 discard(single)
             else:
                 values[identity] = text
+                evidence = ''
 
     for identity, text in values.items():
         pieces[identity] = text
-    result = "".join(pieces)
+    result = ''.join(piece+fixed_tails.get(i,'') for i,piece in enumerate(pieces))
+    if missing_body_translation(translate_input.unicode, result, getattr(getattr(translator,'job',None),'target',None)):
+        discard(messages)
+        stop("正文整段未得到目标语言译文")
     if not check_formula_tokens(translate_input, result):
         discard(messages)
         stop("重组后的公式标记丢失、增加或顺序变化")

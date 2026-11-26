@@ -102,3 +102,7 @@ v0.8.1 打包注意：构建环境曾额外收集根目录 `icudt78.dll`、`icuu
 ## v0.19.1
 
 2026-11-17 本地修复：帮助关闭入口、底部图表确认流程及 Walnut 两处正文受限恢复。GUI 与完整文档运行时共同更新；旧完整包按版本和时间备份，正式入口不变。局部真实请求 2 次、0 自动重试，正文缓存重排与实窗验证见 docs/verification-v0.19.1.md。不制作安装包、不远程发布、不恢复安装验收。
+
+## Windows distribution from v0.20.0
+
+Release one Windows binary: `LinguaFloat-v<version>-windows-x64-Setup.exe`. The corresponding-source ZIP is not a binary distribution. Do not build or publish bridges or repair tools for legacy portable users. Stage the payload, then use `scripts/build_distribution.py build`, `scripts/build_installer.ps1`, and `scripts/release_tools.py prepare --distribution`. The Setup acceptance gate in `scripts/github_publish.py` is mandatory before publishing.

@@ -53,31 +53,164 @@ def publisher_footer_box(page):
     return None
 
 
+def verified_native_links(source, target, clip=None):
+    """Return missing actions only when the printed anchor can still be proved."""
+    if (source.rotation or target.rotation or source.rect!=target.rect or source.cropbox.tl!=fitz.Point(0,0)
+            or target.cropbox.tl!=fitz.Point(0,0)):return []
+    area=fitz.Rect(clip) if clip is not None else target.rect
+    occupied=[item['from'] for item in target.get_links()]; additions=[]
+    st=source.get_textpage(); tt=target.get_textpage(); zoom=fitz.Matrix(2,2)
+    native=source.get_links()
+    for item in native:
+        uri=item.get('uri',''); box=fitz.Rect(item['from'])
+        if (not uri.startswith(('http://','https://','mailto:')) or not area.contains(box)
+                or box.is_empty or box.get_area()>30000):continue
+        if any(other is not item and other.get('uri')!=uri and (box & other['from']).get_area()>box.get_area()*.5 for other in native):continue
+        if uri.startswith('mailto:'):
+            address=uri[7:].partition('?')[0];src=source.search_for(address,textpage=st) if address else []
+            dst=target.search_for(address,textpage=tt) if src else []
+            if len(src)!=1 or len(dst)!=1 or not (box+(-1,-1,1,1)).contains(src[0]):continue
+            box=dst[0]
+            if not area.contains(box):continue
+            # A search for a@x.org also matches a@x.org.uk. Verify the whole
+            # address token on the target baseline, including adjacent glyphs.
+            line=target.get_textbox(fitz.Rect(0,box.y0-.2,target.rect.width,box.y1+.2),textpage=tt)
+            if not re.search(r'(?<![a-zA-Z0-9._%+\-])'+re.escape(address)+r'(?![a-zA-Z0-9_+\-]|\.[a-zA-Z0-9])',line):continue
+        else:
+            if any(box.intersects(r) for r in occupied):continue
+            label=source.get_textbox(box,textpage=st).strip()
+            if not label or label!=target.get_textbox(box,textpage=tt).strip():continue
+            opts=dict(clip=box+(-1,-1,1,1),matrix=zoom,colorspace=fitz.csGRAY,annots=False)
+            pixels=source.get_pixmap(**opts).samples
+            if not pixels or min(pixels)==max(pixels) or pixels!=target.get_pixmap(**opts).samples:continue
+        if any(box.intersects(r) for r in occupied):continue
+        additions.append({'kind':fitz.LINK_URI,'from':box,'uri':uri});occupied.append(box)
+    return additions
+
+
+def contact_fields(page):
+    """Explicit printed correspondence field, confirmed by a matching mailto action."""
+    addresses={l['uri'][7:].partition('?')[0] for l in page.get_links() if l.get('uri','').startswith('mailto:')}
+    if not addresses:return
+    for b in page.get_text('dict',flags=0)['blocks']:
+        for line in b.get('lines',[]):
+            spans=line['spans'];text=''.join(s['text'] for s in spans).strip()
+            m=re.fullmatch(r'([*†‡]?)(?:Correspondence|Corresponding author)\s*:\s*(\S+@\S+)',text,re.I)
+            if not m or m[2] not in addresses or line['dir']!=(1,0):continue
+            hits=page.search_for(m[2]);box=fitz.Rect(line['bbox'])
+            if len(hits)==1 and box.intersects(hits[0]):
+                yield m[2],m[1],box,hits[0],spans[0]
+
+
+def restore_contact_labels(source,target,lang,font_pair=('','')):
+    if lang!='zh-Hans' or source.rect!=target.rect or source.rotation or target.rotation:return 0
+    count=0
+    for address,marker,line,src_email,span in contact_fields(source):
+        hits=target.search_for(address)
+        if len(hits)!=1:continue
+        email=hits[0]
+        if abs(email.x0-src_email.x0)>2 or abs(email.y0-src_email.y0)>2:continue
+        region=fitz.Rect(line.x0,email.y0,email.x0-.5,email.y1)
+        text=marker+'通讯作者：';size=span['size']
+        if region.width<size*len(text) or target.get_textbox(region).strip():continue
+        ink=target.get_pixmap(clip=region,matrix=fitz.Matrix(2,2),annots=False)
+        if not ink.samples or min(ink.samples)<248:continue
+        at=(region.x0,span['origin'][1]+email.y0-src_email.y0);color=fitz.sRGB_to_pdf(span['color'])
+        with fitz.open() as overlay:
+            p=overlay.new_page(width=target.rect.width,height=target.rect.height)
+            if all(font_pair):
+                from linguafloat.document_fonts import FitzFontResolver
+                FitzFontResolver(*font_pair).draw_line(p,at,text,fontsize=size,color=color)
+            else:
+                p.insert_font(fontname='LFContact',fontbuffer=fitz.Font('cjk').buffer)
+                p.insert_text(at,text,fontname='LFContact',fontsize=size,color=color)
+            overlay.subset_fonts();target.show_pdf_page(target.rect,overlay,0,overlay=False)
+        count+=1
+    return count
+
+
 def restore_printed_urls(source, target, clip=None):
     """Bind a unique, intact printed URL to its original HTTP(S) action."""
     from collections import defaultdict
     actions = defaultdict(set)
+    doi_actions = defaultdict(set)
     if source.rotation or target.rotation:
         return 0  # Link and extracted-word coordinates use different spaces on rotated pages.
+    count = 0
+    fitz.JM_refresh_links(target._pdf_page())
+    existing=list(target.get_links())
+    for item in verified_native_links(source,target,clip):
+        target.insert_link(item);existing.append(item);count+=1
+    from linguafloat.document_masthead import printed_uri_buttons
+    if source.rect == target.rect:
+        for item in printed_uri_buttons(source):
+            box = item['from']
+            if ((clip is not None and not fitz.Rect(clip).contains(box))
+                    or any(box.intersects(link['from']) for link in existing)):
+                continue
+            opts = dict(clip=box, matrix=fitz.Matrix(2, 2))
+            pixels = source.get_pixmap(**opts).samples
+            if pixels and min(pixels) != max(pixels) and pixels == target.get_pixmap(**opts, annots=False).samples:
+                target.insert_link(item); existing.append(item); count += 1
     textpage = None
     for link in source.get_links():
         uri = link.get('uri', '')
-        if link['kind'] != fitz.LINK_URI or not uri.startswith(('https://','http://')):
+        if link['kind'] != fitz.LINK_URI or not uri.startswith(('https://','http://','mailto:')):
             continue
         if textpage is None:
             textpage = source.get_textpage()
         label = source.get_textbox(link['from'], textpage=textpage).strip()
+        box=fitz.Rect(link['from'])
+        if source.rect==target.rect and (clip is None or fitz.Rect(clip).contains(box)) and (not label or uri.startswith('mailto:')):
+            if uri.startswith('mailto:'):
+                address=uri[7:].split('?')[0]
+                if not address or label!=address:continue
+                matches=target.search_for(address)
+                if not matches and len(source.search_for(address))==1 and not target.get_textbox(box).strip():
+                    ink=target.get_pixmap(clip=box,matrix=fitz.Matrix(2,2),annots=False)
+                    if ink.samples and min(ink.samples)==255 and not any(box.intersects(l['from']) for l in existing):
+                        from linguafloat.document_clip import show_source_region
+                        glyphbox=source.search_for(address)[0]
+                        if (box+(-1,-1,1,1)).contains(glyphbox):
+                            show_source_region(target,glyphbox,source.parent,source.number)
+                            matches=target.search_for(address)
+                if len(matches)!=1:continue
+                box=matches[0]
+            else:
+                opts=dict(clip=box,matrix=fitz.Matrix(2,2),annots=False)
+                pixels=source.get_pixmap(**opts).samples
+                if not pixels or min(pixels)==max(pixels) or pixels!=target.get_pixmap(**opts).samples:continue
+            if not any(box.intersects(l['from']) for l in existing):
+                item={'kind':fitz.LINK_URI,'from':box,'uri':uri};target.insert_link(item);existing.append(item);count+=1
+            continue
         if label == uri or (label.startswith('www.') and label == uri.split('://',1)[1]):
             actions[label].add(uri)
-    if not actions:
-        return 0
+        match = re.fullmatch(r'https?://(?:dx\.)?doi\.org/(10\.\d{4,9}/[^?#\s]+)',uri,re.I)
+        if match:
+            doi=match[1].casefold()
+            if doi in label.casefold():doi_actions[doi].add(uri)
+    if not actions and not doi_actions:
+        if count:fitz.JM_refresh_links(target._pdf_page())
+        return count
     locations = defaultdict(list)
     for *coords, word, _, _, _ in target.get_text('words', clip=clip):
         if word in actions:
             locations[word].append(fitz.Rect(coords))
+        elif '：' in word:
+            # A Chinese field label can share one PDF word with its URL. Bind
+            # only the literal URL glyphs, never the prefix or a longer path.
+            label = word.rsplit('：', 1)[1]
+            if label in actions:
+                hits = target.search_for(label, clip=fitz.Rect(coords)+(-.1,-.1,.1,.1))
+                locations[label].extend(h for h in hits if target.get_textbox(h).strip() == label)
+        # Exact identifier, optionally followed by sentence punctuation. Do not
+        # attach a shorter DOI to a different paper with a shared prefix.
+        key=re.sub(r'^(?:doi\s*[:：]|:|https?://(?:dx\.)?doi\.org/)', '', word.casefold()).rstrip('.,;。；，')
+        if key in doi_actions:
+            actions[key].update(doi_actions[key])
+            if not locations[key] or locations[key][-1]!=fitz.Rect(coords):locations[key].append(fitz.Rect(coords))
     fitz.JM_refresh_links(target._pdf_page())
     occupied = [l['from'] for l in target.get_links()]
-    count = 0
     for label, boxes in locations.items():
         if len(boxes) != 1 or len(actions[label]) != 1 or any(boxes[0].intersects(r) for r in occupied):
             continue

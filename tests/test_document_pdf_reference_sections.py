@@ -17,6 +17,23 @@ def fixed_start(monkeypatch, **values):
     monkeypatch.setattr(references, "_pdf_start", lambda *args: dict(start))
 
 
+def test_numbered_references_continue_at_top_of_other_column():
+    with fitz.open() as doc:
+        page = doc.new_page(width=600, height=800)
+        page.insert_text((45, 82), 'ORCID iDs')
+        page.insert_text((45, 160), 'References', fontname='hebo')
+        for start, x, y in [(1, 48, 185), (4, 315, 82)]:
+            for n in range(start, start + 3):
+                row = y + 24 * (n - start)
+                page.insert_text((x, row), f'[{n}] Smith A and Jones B 2023 J. Phys. 35 405603', fontsize=9)
+        boundary = pdf_boundary(doc, JobControl(), lambda _: None)
+        assert len(reference_boxes(boundary, 0)) == 2
+        for text in ('[1]', '[4]', '[6]'):
+            assert any(fitz.Rect(b).intersects(page.search_for(text)[0]) for b in reference_boxes(boundary, 0))
+        assert not any(fitz.Rect(b).intersects(page.search_for('ORCID iDs')[0])
+                       for b in reference_boxes(boundary, 0))
+
+
 def test_wrapped_citation_keyword_does_not_end_bibliography(monkeypatch):
     fixed_start(monkeypatch)
     with fitz.open() as doc:

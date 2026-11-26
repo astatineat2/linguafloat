@@ -1,4 +1,4 @@
-"""Independent tables belong to body jobs, never to the image-only UI action."""
+"""Independent table detection and explicit follow-up routing."""
 from dataclasses import replace
 from types import SimpleNamespace as NS
 
@@ -57,18 +57,20 @@ def test_mixed_header_joins_natural_words_without_sending_units():
     assert {l['text'] for l in outside} == {'(peak', 'area 10'}
 
 
-def test_body_allows_independent_tables_but_not_automatic_images(tmp_path):
+def test_body_rejects_either_graphics_flag_before_work(tmp_path):
     source = tmp_path / 'table.pdf'
     with f.open() as pdf:
         pdf.new_page()
         pdf.save(source)
     job = DocumentJob(str(source), str(tmp_path), dict(base_url='https://test.invalid',
-        model='mock', api_mode='responses'), workflow='body', pdf_mode='layout', translate_tables=True)
+        model='mock', api_mode='responses'), workflow='body', pdf_mode='layout')
     job.validate()
     from linguafloat.document_core import DocumentError
     import pytest
     with pytest.raises(DocumentError):
         replace(job, translate_figures=True).validate()
+    with pytest.raises(DocumentError):
+        replace(job, translate_tables=True).validate()
 
 
 def test_three_line_table_uses_native_cells_without_ocr():

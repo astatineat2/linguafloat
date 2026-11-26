@@ -93,33 +93,29 @@ def publish(client):
     review = json.loads((folder / "LOCAL-RELEASE-REVIEW.json").read_text(encoding="utf-8"))
     if review.get("public_release_ready") is not True:
         raise SystemExit("此候选版尚未完成公开发布前的材料或验证，未上传。")
-    required = [f"LinguaFloat-v{__version__}-win-x64.zip", f"LinguaFloat-v{__version__}-corresponding-source.zip",
+    required = [f"LinguaFloat-v{__version__}-windows-x64-Setup.exe", f"LinguaFloat-v{__version__}-corresponding-source.zip",
                 "update.json", "update.json.sig", "SHA256SUMS.txt"]
-    if review.get('legacy_repair'):
-        required[-1:-1] = ['LinguaFloat-Repair-v011.exe', 'LinguaFloat-Repair-v011.sha256', 'LinguaFloat-Repair-v011.sha256.sig']
-        from linguafloat.update_core import verify_signature, load_channel, sha256_file
-        attestation = (folder / required[-3]).read_bytes()
-        verify_signature(attestation, (folder / required[-2]).read_bytes(), load_channel()['public_key'])
-        if attestation != f'{sha256_file(folder / required[-4])}  {required[-4]}\n'.encode('ascii'):
-            raise SystemExit('一次性修复工具与发布者签名不匹配。')
     sys.path.insert(0, str(ROOT / "src"))
     from linguafloat.update_core import check_archive, load_channel, parse_manifest, sha256_file
     payload = (folder / "update.json").read_bytes()
     release = parse_manifest(payload, (folder / "update.json.sig").read_bytes(), load_channel(), __version__)
     expected_url = f"https://github.com/{OWNER}/linguafloat-releases/releases/download/v{__version__}/{required[0]}"
-    if release.version != __version__ or release.url != expected_url:
-        raise SystemExit("签名清单与待发布的版本或便携包下载地址不一致。")
+    if not release.setup or release.version != __version__ or release.url != expected_url:
+        raise SystemExit("签名清单与待发布的 Setup 不一致。")
     check_archive(folder / required[0], release)
     try:
-        acceptance = json.loads((folder / 'UPGRADE-ACCEPTANCE.json').read_text(encoding='utf-8'))
+        acceptance = json.loads((folder / 'SETUP-ACCEPTANCE.json').read_text(encoding='utf-8'))
         accepted = (acceptance['to_version'] == release.version
-                    and Version(acceptance['from_version']) < Version(release.version)
+                    and acceptance['clean_install'] is True and acceptance['uninstalled'] is True
+                    and acceptance['user_files_preserved'] is True
+                    and (release.version == '0.20.0' or (Version('0.20.0') <= Version(acceptance['from_version']) < Version(release.version)
+                         and acceptance['restarted_in_place'] is True))
                     and acceptance['package_sha256'] == sha256_file(folder / required[0])
-                    and acceptance['restarted_in_place'] is True and acceptance['configuration_preserved'] is True)
+                    and acceptance['configuration_preserved'] is True)
     except (OSError, ValueError, TypeError, KeyError):
         accepted = False
     if not accepted:
-        raise SystemExit('缺少与当前便携包匹配的旧版升级验收记录，不上传、不切换 Latest。')
+        raise SystemExit('缺少与当前 Setup 匹配的安装、卸载或更新验收记录，不上传。')
     checksums = dict(line.split("  ", 1)[::-1] for line in (folder / "SHA256SUMS.txt").read_text().splitlines())
     for name in required[:-1]:
         if sha256_file(folder / name) != checksums[name]:
@@ -135,7 +131,7 @@ def publish(client):
         raise SystemExit("此版本已公开，不覆盖历史附件。请使用新版本号。")
     notes = (ROOT / "docs/public/本版更新.md").read_text(encoding="utf-8")
     created = matches[0] if matches else request(client, "POST", base, json={"tag_name": f"v{__version__}", "name": f"LinguaFloat v{__version__}",
-                      "body": notes + "\n\n请下载完整 win-x64.zip；对应源码另见 corresponding-source.zip。", "draft": True, "prerelease": False})
+                      "body": notes + "\n\nWindows 用户请下载 windows-x64-Setup.exe；源码另见 corresponding-source.zip。", "draft": True, "prerelease": False})
     url = created["upload_url"].split("{")[0]
     for name in required:
         path = folder / name

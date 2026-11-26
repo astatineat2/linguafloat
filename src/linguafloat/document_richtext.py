@@ -198,6 +198,34 @@ def restore_cached_caption_markers(page):
                 part.pdf_formula = caption_formula(f.pdf_character[0])
 
 
+def _wrapped_prose_dates(paragraph):
+    """A line-final preposition and next-line year can be mistaken for stacked math."""
+    from linguafloat.document_scientific import composition_chars
+    parts = paragraph.pdf_paragraph_composition
+    dates = {}
+    if paragraph.layout_label not in ('plain text', 'text'):
+        return dates
+    for i, part in enumerate(parts[:-1]):
+        f = part.pdf_formula
+        if not f or isinstance(f, CaptionMarker) or f.pdf_curve or f.pdf_form or f.is_corner_mark:
+            continue
+        chars = f.pdf_character
+        match = re.fullmatch(r'(In|By|Since|During)([12][0-9]{3})', ''.join(c.char_unicode or '' for c in chars))
+        if not match or any(not c.box or c.vertical or not c.pdf_style or len(c.char_unicode or '') != 1 for c in chars):
+            continue
+        n = len(match[1]); size = chars[0].pdf_style.font_size or 0
+        if not size or any(_style_key(c.pdf_style) != _style_key(chars[0].pdf_style) for c in chars):
+            continue
+        if not (.8*size < chars[0].box.y-chars[n].box.y < 2*size and chars[n].box.x < chars[0].box.x):
+            continue
+        if any(abs(c.box.y-group[0].box.y)>.1*size for group in (chars[:n],chars[n:]) for c in group):
+            continue
+        next_text = ''.join(c.char_unicode or '' for c in composition_chars(parts[i+1]))
+        if re.match(r'^\s*,?\s*[A-Za-z]{2,}\b', next_text):
+            dates[i] = ' '+match[1]+' '+match[2]+' '
+    return dates
+
+
 def styled_translate_input(engine, paragraph, original, *args, **kwargs):
     """Keep style placeholders even when a scientific paragraph has many formulas."""
     from babeldoc.format.pdf.document_il.midend.il_translator import ILTranslator
@@ -207,7 +235,8 @@ def styled_translate_input(engine, paragraph, original, *args, **kwargs):
     # Pure-formula/numeric paragraphs and unicode-only cache data retain the
     # engine's skip rules. Only rich source runs require this adapter.
     rich = [p.pdf_same_style_characters for p in parts if p.pdf_same_style_characters]
-    if not rich or not any(_style_key(r.pdf_style) != _style_key(paragraph.pdf_style) for r in rich):
+    dates = _wrapped_prose_dates(paragraph)
+    if not dates and (not rich or not any(_style_key(r.pdf_style) != _style_key(paragraph.pdf_style) for r in rich)):
         return original(engine, paragraph, *args, **kwargs)
     original_tokens = {}
     for name in ('_formula_placeholder_pattern', '_style_left_placeholder_pattern', '_style_right_placeholder_pattern'):
@@ -217,13 +246,16 @@ def styled_translate_input(engine, paragraph, original, *args, **kwargs):
                 token = match.group(0)
                 original_tokens[token] = original_tokens.get(token, 0) + 1
     tokens, placeholders, next_id = [], [], 1
-    for part in parts:
-        if part.pdf_formula:
+    for i,part in enumerate(parts):
+        if i in dates:
+            tokens.append(dates[i])
+        elif part.pdf_formula:
             item = engine.process_formula(part.pdf_formula, next_id, paragraph)
             placeholders.append(item)
             tokens.append(item.placeholder)
             next_id = item.id + 1
-        elif part.pdf_same_style_characters and _style_key(part.pdf_same_style_characters.pdf_style) != _style_key(paragraph.pdf_style):
+        elif (part.pdf_same_style_characters and _style_key(part.pdf_same_style_characters.pdf_style) != _style_key(paragraph.pdf_style)
+              and any(c.char_unicode != ' ' for c in part.pdf_same_style_characters.pdf_character)):
             item = engine.process_composition(part.pdf_same_style_characters, next_id, paragraph)
             placeholders.append(item)
             tokens.extend([item.left_placeholder, *item.composition.pdf_character, item.right_placeholder])

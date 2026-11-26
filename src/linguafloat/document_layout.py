@@ -6,11 +6,49 @@ Coordinates in this module use PDF's bottom-left origin.
 from __future__ import annotations
 
 import copy
+import json
 import re
 import threading
 from collections import defaultdict
 
 from linguafloat.document_core import DocumentError
+
+
+def _validated_repair_key(translator, digest, location, ti):
+    """Local-only cache key, separate from raw batch replies and bound to native slots."""
+    if not digest or not location:
+        return None
+    slots = []
+    for ph in ti.placeholders:
+        if hasattr(ph, 'placeholder'):
+            chars = ''.join(c.char_unicode or '' for c in ph.formula.pdf_character) if ph.formula else None
+            slots.append((ph.placeholder, chars))
+        else:
+            slots.append(ph.to_dict())
+    msg = translator.messages(ti.unicode)
+    msg[0]['content'] += ' Local validated paragraph v1: ' + json.dumps([digest, location, slots], ensure_ascii=False)
+    return translator.cache_key(msg)
+
+
+def keep_email_units_together(units):
+    # The engine treats @ and dots as break points. Its look-ahead must
+    # measure the complete address before placing the first character.
+    chars = [u.try_get_unicode() for u in units]
+    text = ''.join(c if c and len(c) == 1 else '\ufffc' for c in chars)
+    addresses = []
+    for m in re.finditer(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', text, re.ASCII):
+        addresses.append(m[0])
+        for unit in units[m.start():m.end()]:
+            unit.can_break_line_cache = False
+    return addresses
+
+
+def emails_fit_lines(placed, addresses):
+    from itertools import groupby
+    lines = [''.join(u.try_get_unicode() or '\ufffc' for u in group)
+             for _, group in groupby(placed, key=lambda u: round(u._lf_line_y, 2))]
+    return all(sum(line.count(address) for line in lines) >= addresses.count(address)
+               for address in set(addresses))
 
 
 def bounds(value):
@@ -64,6 +102,38 @@ def _copy_passthrough_instruction(instruction, memo):
     return value
 
 
+def split_numbered_rows(paragraph, words):
+    """Recover separate source rows only for an exact sequence of styled text runs."""
+    parts=paragraph.pdf_paragraph_composition
+    if not paragraph.box or not parts or not all(c.pdf_same_style_unicode_characters for c in parts):return []
+    strings=[c.pdf_same_style_unicode_characters.unicode or '' for c in parts]
+    text=''.join(strings)
+    if not re.match(r'^\s*1[.)、]',text):return []
+    marks=list(re.finditer(r'(?<![\w.])([1-9]\d?)[.)、](?!\d)',text))
+    nums=[int(m[1]) for m in marks]
+    if len(nums)<3 or nums!=list(range(1,len(nums)+1)):return []
+    x,y,x2,y2=bounds(paragraph)
+    anchors=sorted([(int(s[:-1]),b) for s,b in words if re.fullmatch(r'[1-9]\d?[.)]',s)
+                    and abs(b[0]-x)<3 and y-1<(b[1]+b[3])/2<y2+1],key=lambda item:-item[1][3])
+    if [n for n,_ in anchors]!=nums:return []
+    from babeldoc.format.pdf.document_il import Box
+    out=[]
+    for i,(m,(_,b)) in enumerate(zip(marks,anchors)):
+        end=marks[i+1].start() if i+1<len(marks) else len(text)
+        top=y2 if i==0 else (anchors[i-1][1][1]+b[3])/2
+        bottom=y if i+1==len(anchors) else (b[1]+anchors[i+1][1][3])/2
+        if bottom>=top:return []
+        row=copy.copy(paragraph);row.box=Box(x,bottom,x2,top);row.first_line_indent=False
+        row.unicode=text[m.start():end];row.pdf_paragraph_composition=[];pos=0
+        for part,string in zip(parts,strings):
+            lo=max(0,m.start()-pos);hi=min(len(string),end-pos);pos+=len(string)
+            if lo<hi:
+                piece=copy.copy(part);run=copy.copy(piece.pdf_same_style_unicode_characters)
+                run.unicode=string[lo:hi];piece.pdf_same_style_unicode_characters=run;row.pdf_paragraph_composition.append(piece)
+        out.append(row)
+    return out
+
+
 class LayoutPolicy:
     def __init__(self, control, source=None, pages=None, translator=None):
         self.control = control
@@ -74,6 +144,7 @@ class LayoutPolicy:
         self.warnings = []
         self.records = []
         self.geometry_repairs = []
+        self.row_order_offsets = {}
         self.retained_regions = defaultdict(list)
         self.original_boxes = {}
         self.prepared = set()
@@ -82,6 +153,7 @@ class LayoutPolicy:
         self.font_counter = 0
         self._saved = {}
         self.source_words = {}
+        self.caption_words = {}
         self.source_lines = {}
         self.source_characters = {}
         self.source_subscripts = {}
@@ -98,6 +170,7 @@ class LayoutPolicy:
         self.paragraph_pages = {}
         self.active = threading.local()
         self.request_keys = defaultdict(set)
+        self.review_trace = {}
         self.reference_boundary = {}
         if source and translator:
             from linguafloat.document_scientific import ScientificLayout
@@ -108,6 +181,10 @@ class LayoutPolicy:
                 for number, page in enumerate(document):
                     if pages is not None and number not in pages:
                         continue
+                    if not page.rotation and (page.cropbox.x0 or page.cropbox.y0):
+                        inverse = ~page.transformation_matrix
+                        self.caption_words[number] = [(w[4], tuple(pymupdf.Rect(w[:4]) * inverse))
+                                                      for w in page.get_text('words')]
                     # Ignore ambiguous coordinate systems instead of removing text
                     # based on an unverified match in a rotated/cropped page.
                     if page.rotation or page.cropbox.x0 or page.cropbox.y0:
@@ -115,6 +192,9 @@ class LayoutPolicy:
                     height = page.rect.height
                     from linguafloat.document_structure import source_structure
                     self.source_structures[number] = source_structure(page)
+                    if translator and translator.job.target == 'zh-Hans':
+                        from linguafloat.document_inline_publication import rows
+                        self.source_structures[number]['preserve'].extend(rows(page))
                     from linguafloat.document_publication import split_identifier_links
                     self.source_identifier_links[number] = split_identifier_links(page)
                     from linguafloat.document_publication import date_rows
@@ -150,11 +230,11 @@ class LayoutPolicy:
         result = [tuple(r["box"]) for r in self.retained_regions.get(page.page_number, [])]
         height=page.cropbox.box.y2-page.cropbox.box.y
         for area in self.frontmatter.get(page.page_number,[])+self.graphic_regions.get(page.page_number,[]):
-            x0,y0,x1,y1=area["box"]
-            result.append((x0,height-y1,x1,height-y0))
+            from linguafloat.document_geometry import protected_pdf_box
+            result.append(protected_pdf_box(area,height))
         if self.reference_boundary:
             from linguafloat.document_references import reference_boxes
-            result.extend((x0,height-y1,x1,height-y0) for x0,y0,x1,y1 in reference_boxes(self.reference_boundary, page.page_number))
+            result.extend(self.reference_boundary.get('pdf_boxes',{}).get(str(page.page_number)) or [(x0,height-y1,x1,height-y0) for x0,y0,x1,y1 in reference_boxes(self.reference_boundary,page.page_number)])
         for other in page.pdf_paragraph:
             if other is paragraph:
                 continue
@@ -199,6 +279,17 @@ class LayoutPolicy:
                 self.geometry_repairs.append(dict(page=page.page_number+1, kind='cjk_boundary_spaces', runs=changed))
         page.pdf_paragraph[:] = [p for p in page.pdf_paragraph if id(p) not in self.failed_paragraphs]
         self.exclude_frontmatter(page)
+        for paragraph in list(page.pdf_paragraph):
+            replacement=split_numbered_rows(paragraph,self.source_words.get(page.page_number,()))
+            if replacement:
+                index=page.pdf_paragraph.index(paragraph)
+                page.pdf_paragraph[index:index+1]=replacement
+                offset=0
+                for row in replacement:
+                    self.row_order_offsets[id(row)]=offset
+                    self.paragraph_pages[id(row)]=page
+                    offset+=len(row.unicode)+1
+                self.geometry_repairs.append(dict(page=page.page_number+1,kind='numbered_rows',count=len(replacement)))
         from babeldoc.format.pdf.document_il import Box
         from linguafloat.document_scientific import repair_cached_chemical_scripts
         from linguafloat.document_geometry import join_fragmented_paragraphs, attach_formula_rules, preserve_symbol_labels, restore_reference_styles
@@ -259,10 +350,11 @@ class LayoutPolicy:
         # Unicode-only engine fallbacks may have no source glyph list. Only
         # wholly contained paragraphs can safely be excluded by rectangle.
         figures = self.graphic_regions.get(page.page_number, [])
+        from linguafloat.document_geometry import protected_pdf_box
+        boxes = [protected_pdf_box(r,height) for r in figures]
         page.pdf_paragraph[:] = [p for p in page.pdf_paragraph if not (p.box and any(
-            r['box'][0] <= p.box.x and p.box.x2 <= r['box'][2]
-            and r['box'][1] <= height-p.box.y2 and height-p.box.y <= r['box'][3]
-            for r in figures))]
+            x0 <= p.box.x and p.box.x2 <= x1 and y0 <= p.box.y and p.box.y2 <= y1
+            for x0,y0,x1,y1 in boxes))]
 
     def remove_title_remnants(self, page):
         titles = [p for p in page.pdf_paragraph if p.layout_label == "title" and p.box
@@ -382,6 +474,7 @@ class LayoutPolicy:
         if not paragraph.box:
             raise DocumentError(f"[PDF 段落缺少坐标] 原始第 {page.page_number + 1} 页，无法安全排版。")
         units = self.normalize_dropcap(units, paragraph, page) if apply_layout else units
+        addresses = keep_email_units_together(units) if '@' in (paragraph.unicode or '') else []
         original = self.original_boxes.get(id(paragraph), paragraph.box)
         obstacles = self.obstacles(page, paragraph)
         boxes = list(expanded_boxes(original, obstacles, bounds(page.cropbox)))
@@ -409,6 +502,8 @@ class LayoutPolicy:
                     placed, fits = engine._layout_typesetting_units(units, box, scale, spacing, paragraph, use_english_line_break)
                     if not fits or not placed:
                         continue
+                    if addresses and not emails_fit_lines(placed, addresses):
+                        continue
                     from linguafloat.document_geometry import space_formula_lines
                     placed, fits = space_formula_lines(placed, box, size*scale)
                     if not fits:
@@ -419,7 +514,7 @@ class LayoutPolicy:
                         continue
                     if apply_layout:
                         self.apply(engine, paragraph, page, placed, box, scale)
-                        self.records.append(dict(page=page.page_number + 1, text=paragraph.unicode,
+                        self.records.append(dict(page=page.page_number + 1, text=paragraph.unicode, role=paragraph.layout_label,
                                                  size=size * scale, original_size=size,
                                                  adjustment_reason='原区域安全排版需要局部缩小' if scale < 1 else '',
                                                  spacing=spacing, box=bounds(box),
@@ -761,7 +856,8 @@ class LayoutPolicy:
                 from linguafloat.document_geometry import attach_detached_citations, repair_split_captions
                 policy.geometry_repairs.extend(dict(page=page.page_number+1, **c) for c in attach_detached_citations(page))
                 policy.geometry_repairs.extend(dict(page=page.page_number+1, **c) for c in
-                    repair_split_captions(page, policy.source_words.get(page.page_number, [])))
+                    repair_split_captions(page, policy.caption_words.get(page.page_number,
+                                          policy.source_words.get(page.page_number, []))))
                 for index, paragraph in enumerate(page.pdf_paragraph):
                     locations[id(paragraph)] = f"原始第 {page.page_number + 1} 页 · 段落 {index + 1}"
             translator = policy.scientific.translator if policy.scientific else None
@@ -810,6 +906,11 @@ class LayoutPolicy:
                         if id(paragraph) not in policy.failed_paragraphs and id(paragraph) in source_pairs:
                             number, source, role = source_pairs[id(paragraph)]
                             translator.graphic_context.remember(number, source, paragraph.unicode or "", role)
+            if translator and getattr(getattr(translator, 'job', None), 'workflow', '') == 'body':
+                for identity, (number, source, role) in source_pairs.items():
+                    pbox = bounds(policy.original_boxes.get(identity))
+                    if pbox and len(source) >= 80 and role not in {'abandon', 'table', 'figure'}:
+                        policy.review_trace[identity] = (number, pbox, role, source)
             return result
 
         def located(engine, paragraph, *args, batch=False, **kwargs):
@@ -833,32 +934,51 @@ class LayoutPolicy:
                 if translator:
                     translator.location = previous
 
-        def post_translate_impl(engine, paragraph, tracker, translate_input, translated_text):
-            from linguafloat.document_scientific import check_formula_tokens, translate_formula_segments
+        def repair_key(paragraph, ti, translator):
+            return _validated_repair_key(translator, getattr(policy,'repair_source_digest',None),
+                                         locations.get(id(paragraph)), ti)
+
+        def valid(translate_input, text):
+            from linguafloat.document_scientific import (check_formula_tokens,
+                                                        missing_body_translation, missing_plural_identifiers, lost_elevated_comparison)
             from linguafloat.document_richtext import validate_styles, caption_brackets_match
-            def valid(text):
-                return (check_formula_tokens(translate_input, text) and validate_styles(translate_input, text)
-                        and caption_brackets_match(translate_input, text))
-            if not valid(translated_text):
+            return (check_formula_tokens(translate_input, text) and validate_styles(translate_input, text)
+                        and caption_brackets_match(translate_input, text)
+                        and not missing_plural_identifiers(translate_input.unicode,text)
+                        and not (policy.scientific and policy.scientific.translator.job.target=='zh-Hans'
+                                 and lost_elevated_comparison(translate_input.unicode,text))
+                        and not (policy.scientific and missing_body_translation(translate_input.unicode, text,
+                            policy.scientific.translator.job.target)))
+        def post_translate_impl(engine, paragraph, tracker, translate_input, translated_text):
+            from linguafloat.document_scientific import translate_formula_segments, attach_measurement_nucleus
+            translator = policy.scientific.translator if policy.scientific else None
+            translated_text=attach_measurement_nucleus(translate_input,translated_text)
+            if not valid(translate_input,translated_text):
                 if policy.scientific:
                     # A reply with damaged anchors must never remain a success
                     # cache entry, even if the separate repair request succeeds.
-                    for key in policy.request_keys.get(id(paragraph), ()):
-                        policy.scientific.translator.store.discard(key)
+                    for rejected_key in policy.request_keys.get(id(paragraph), ()):
+                        policy.scientific.translator.store.discard(rejected_key)
                 if policy.scientific:
-                    translator = policy.scientific.translator
                     previous = translator.location
                     translator.location = locations.get(id(paragraph), "段落 " + str(paragraph.debug_id))
                     try:
                         translated_text = translate_formula_segments(translate_input, translator)
+                        translated_text = attach_measurement_nucleus(translate_input,translated_text)
                     finally:
                         translator.location = previous
-                if not valid(translated_text):
+                if not valid(translate_input,translated_text):
                     error = DocumentError(f"[公式/样式校验失败] 段落 {paragraph.debug_id}：补译后仍有公式、格式标记或图注括号归属变化，已保留原文。")
                     raise error
             result = policy._saved["post_translate"](engine, paragraph, tracker, translate_input, translated_text)
             from linguafloat.document_richtext import remap_unchanged_prose
             remap_unchanged_prose(paragraph, translate_input, translated_text)
+            # A sibling may invalidate the shared raw batch response later.
+            # Preserve each successfully parsed member under its own key.
+            if result and translator and not translator.job.relayout_only:
+                key=repair_key(paragraph,translate_input,translator)
+                if key:
+                    translator.store.put(key,translated_text)
             return result
 
         def recover(paragraph, error, stage):
@@ -868,9 +988,23 @@ class LayoutPolicy:
                 policy.translation_failures.append(fatal)
                 raise
 
-        def pre_translate(engine, paragraph, *args, **kwargs):
+        def pre_translate(engine, paragraph, tracker, *args, **kwargs):
             try:
-                return policy._saved["pre_translate"](engine, paragraph, *args, **kwargs)
+                text,ti=policy._saved["pre_translate"](engine, paragraph, tracker, *args, **kwargs)
+                tr=policy.scientific.translator if policy.scientific else None
+                if text and tr and tr.job.relayout_only:
+                    key=repair_key(paragraph,ti,tr)
+                    cached=tr.store.get(key) if key else None
+                    if cached is not None:
+                        if valid(ti,cached):
+                            tracker.new_llm_translate_tracker().set_output(cached)
+                            if post_translate_impl(engine,paragraph,tracker,ti,cached):
+                                with tr.lock:
+                                    tr.hits+=1
+                                    tr.usage()
+                                return None,None
+                        tr.store.discard(key)
+                return text,ti
             except Exception as error:
                 recover(paragraph, error, "段落解析")
                 return None, None
@@ -886,7 +1020,15 @@ class LayoutPolicy:
                 return
             curves, forms = len(page.pdf_curve), len(page.pdf_form)
             try:
-                return policy._saved["typeset_paragraph"](engine, paragraph, page, *args, **kwargs)
+                result=policy._saved["typeset_paragraph"](engine, paragraph, page, *args, **kwargs)
+                # Sibling rows share their parent's paint order. Without unique
+                # suborders the PDF writer interleaves their first glyphs, then their seconds.
+                offset=policy.row_order_offsets.get(id(paragraph),0)
+                if offset:
+                    for part in paragraph.pdf_paragraph_composition:
+                        if part.pdf_character and part.pdf_character.sub_render_order is not None:
+                            part.pdf_character.sub_render_order+=offset
+                return result
             except Exception as error:
                 del page.pdf_curve[curves:]
                 del page.pdf_form[forms:]

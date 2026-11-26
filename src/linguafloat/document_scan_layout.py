@@ -100,7 +100,8 @@ class ScanAnalyzer:
     def build(self,page,kind,lines,areas,digest):
         import pymupdf as f
         owners = []
-        if self.table_analyzer and getattr(self.translator.job,'translate_tables',False):
+        if self.table_analyzer and (getattr(self.translator.job, 'workflow', None) == 'body'
+                                    or getattr(self.translator.job, 'translate_tables', False)):
             fields = ruled_field_boxes(page)
             for table in self.table_analyzer.discover_areas(page,digest):
                 if table['kind'] != 'table':
@@ -117,10 +118,17 @@ class ScanAnalyzer:
                     self.form_owned_tables.setdefault(page.number,set()).add(table['id'])
                 else:
                     owners.append(dict(label='owned_table',confidence=1,box=table['box']))
-        return build_regions(page,kind,lines,[*areas,*owners])
+        areas=[*areas,*owners]
+        regions=build_regions(page,kind,lines,areas,analyzer=self)
+        from linguafloat.document_scan_recovery import recover_regions
+        if kind!='scan_ocr':
+            return recover_regions(page,regions,self,digest)
+        from copy import deepcopy
+        from linguafloat.document_scan_consensus import corroborate,replace_held
+        old=recover_regions(page,deepcopy(regions),self,digest)
+        return replace_held(old,corroborate(page,regions,areas,self,held=old))
 
     def regions(self, page, kind, digest):
-        from linguafloat.document_scan_recovery import recover_regions
         import numpy as np
         import pymupdf as fitz
         from importlib.metadata import version
@@ -139,7 +147,7 @@ class ScanAnalyzer:
         self.translator.control.checkpoint()
         if isinstance(data, dict) and isinstance(data.get("lines"), list) and isinstance(data.get("areas"), list):
             self.emit({"type": "measurement", "name": "扫描区域/OCR 缓存命中", "seconds": 0})
-            return recover_regions(page, self.build(page, kind, data['lines'], data['areas'],digest), self, digest)
+            return self.build(page, kind, data['lines'], data['areas'],digest)
         started = active_clock(self.translator.control)
         lines = self.ocr.recognize(page, positioned=True)
         if self.model is None:
@@ -157,7 +165,7 @@ class ScanAnalyzer:
         self.emit({"type": "measurement", "name": "扫描页版面识别", "seconds": active_clock(self.translator.control) - started})
         if store and lines:
             store.put(key, json.dumps(dict(lines=lines, areas=areas), ensure_ascii=False))
-        return recover_regions(page, self.build(page, kind, lines, areas,digest), self, digest)
+        return self.build(page, kind, lines, areas,digest)
 
 
 def separate_regions(page, regions):
@@ -213,6 +221,10 @@ def separate_regions(page, regions):
                         and (start[1] + start[3] - last[1] - last[3]) / 2 >= height * .75):
                     merged = dict(first, box=list(a | b), text=upper["text"] + "\n\n" + lower["text"],
                                   lines=upper["lines"] + lower["lines"])
+                    if upper.get('inline_notation') or lower.get('inline_notation'):
+                        merged.update(atomic=True, inline_notation=True)
+                    if upper.get('confirmed_row') or lower.get('confirmed_row'):
+                        merged.update(atomic=True, confirmed_row=True)
                     if first.get('label') == 'form_choice':
                         merged['source_paragraph_lines'] = [
                             *upper.get('source_paragraph_lines', [upper['lines']]),
@@ -284,7 +296,7 @@ def checkbox_label_rows(page, lines):
     return result
 
 
-def build_regions(page, kind, lines, areas):
+def build_regions(page, kind, lines, areas, *, analyzer=None):
     from linguafloat.document_scan_recovery import starts_numbered_item
     import pymupdf as fitz
     allowed = {"plain text", "title", "figure_caption", "table_caption"}
@@ -308,6 +320,10 @@ def build_regions(page, kind, lines, areas):
         regions.append(dict(box=list((rect + (-1.5, -1.5, 1.5, 1.5)) & page.rect),
                             text=join_ocr_lines(group), lines=group, label=label, reason=reason,
                             outline_prose=kind == 'scan_vector' or (kind=='scan_image' and label=='title')))
+        if any(line.get('confirmed_notation') for line in group):
+            regions[-1].update(atomic=True, inline_notation=True)
+        if any(line.get('confirmed_row') for line in group):
+            regions[-1].update(atomic=True, confirmed_row=True)
 
     fields = ruled_field_boxes(page) if kind in ('scan_image','scan_vector') else []
     for i, controls in checkbox_label_rows(page, lines).items():
@@ -349,6 +365,9 @@ def build_regions(page, kind, lines, areas):
         group, previous = [], None
         for _, line in members:
             box, reason = fitz.Rect(line["box"]), ""
+            if kind=='scan_ocr' and area['label']=='plain text' and area['confidence']>=.8 and analyzer and not any(box.intersects(p) for p in protected):
+                from linguafloat.document_scan_consensus import recover_truncated_row
+                line=recover_truncated_row(page,line,analyzer)
             if area["confidence"] < .8:
                 reason = "版面归类置信度不足，需核对该局部区域"
             elif line["confidence"] < .95 or not line["horizontal"]:
@@ -358,7 +377,11 @@ def build_regions(page, kind, lines, areas):
             elif kind == "mixed" and any(box.intersects(p) for p in visible):
                 reason = "本行与可见数字文字层相交，无法安全分离"
             elif risky_math(line["text"]):
-                reason = "本行包含公式符号，保留本行以保护公式及上下标"
+                from linguafloat.document_scan_consensus import confirmed_inline_notation
+                if kind=='scan_ocr' and area['label']=='plain text' and analyzer and confirmed_inline_notation(page,line,analyzer):
+                    line=dict(line,confirmed_notation=True)
+                else:
+                    reason = "本行包含公式符号，保留本行以保护公式及上下标"
             separated = False
             if group:
                 last = fitz.Rect(group[-1]["box"])
@@ -768,14 +791,27 @@ def translate_scan_page(source, number, kind, analyzer, digest, translator, emit
                 stage = "翻译"
                 try:
                     if region.get('atomic') and hasattr(translator, 'translate_fragment'):
-                        translation = translator.translate_fragment(region['text'], region.get('context', ''),
-                            part='扫描图注或字段', validate=lambda value: validate_scan_values(region['text'], value))
+                        from linguafloat.document_scan_consensus import validate_block, validate_inline_notation
+                        check=validate_block if region.get('raster_consensus') or region.get('confirmed_row') else validate_scan_values
+                        consensus=region.get('raster_consensus')
+                        context=region.get('context','') if not consensus else (
+                            'Retain all sample identifiers, letter labels, units, superscripts, numeric ranges and '
+                            'value/error pairs exactly as printed, including significant zeros. Translate complete prose; '
+                            'hyphens at OCR line breaks may interrupt a word. Keep label and value associations.')
+                        if region.get('inline_notation'):
+                            check=validate_inline_notation
+                            context='Translate the complete prose. Keep each Greek linkage (letter and locants), D-/L- configurations and source quantities exactly. Preserve paragraph boundaries.'
+                        translation = translator.translate_fragment(region['text'], context,
+                            part='扫描整块交叉核对' if consensus else '扫描图注或字段', validate=lambda value: check(region['text'], value))
                     elif region.get("context") and hasattr(translator, "translate_fragment"):
                         translation = translator.translate_fragment(region["text"], region["context"])
                     else:
                         translation = translator.translate(region["text"])
                     translator.control.checkpoint()
-                    if region.get('atomic'):
+                    if region.get('raster_consensus'):
+                        from linguafloat.document_scan_consensus import validate_block
+                        validate_block(region['text'],translation)
+                    elif region.get('atomic'):
                         validate_scan_values(region['text'], translation)
                     if hasattr(translator, "graphic_context"):
                         translator.graphic_context.remember(number, region["text"], translation,
@@ -801,7 +837,9 @@ def translate_scan_page(source, number, kind, analyzer, digest, translator, emit
             translated.insert_image(fitz.Rect(patch[1]), stream=patch[0], mask=patch[2])
             with fitz.open(stream=fitted[0], filetype="pdf") as overlay:
                 translated.show_pdf_page(translated.rect, overlay, 0)
-            placed.append(dict(page=number + 1, box=region["box"], text=translation, **fitted[1]))
+            placed.append(dict(page=number + 1, box=region["box"], text=translation, **fitted[1],
+                               **({'source_ocr_sha256':hashlib.sha256(region['text'].encode()).hexdigest(),
+                                   'ocr_method':'raster_consensus'} if region.get('raster_consensus') else {})))
         return result, retained, placed
     except BaseException:
         result.close()
@@ -884,7 +922,8 @@ def translate_mixed_layout_pdf(job, translator, output, emit, pages, kinds):
                     raise DocumentError(f"[保留版式尺寸校验失败] 原始第 {number + 1} 页，已停止发布。")
                 if number not in digital:
                     from linguafloat.document_failures import mark_pdf
-                    mark_pdf(fragment[0], report["untranslated_regions"].get(str(number), []), number)
+                    mark_pdf(fragment[0], report["untranslated_regions"].get(str(number), []), number,
+                             text_boxes=[p['box'] for p in report['paragraphs'] if p.get('ocr_method')=='raster_consensus' and p['page']==number+1])
                 mono.insert_pdf(fragment)
         # Every selected page's body is now available as bounded label context.
         for index, number in enumerate(pages):

@@ -26,7 +26,10 @@ for path in (root / "src/linguafloat").glob("*.py"):
     if path.stem in {"__main__", "cc_switch_ui"}:
         continue
     module = "linguafloat" if path.stem == "__init__" else f"linguafloat.{path.stem}"
-    if path.stem in {'document_panel_text','document_clip','document_reviewed','document_glyph_patch'}:
+    if path.stem in {'document_panel_text','document_clip','document_reviewed','document_glyph_patch',
+                     'document_accents','document_scan_consensus','document_rotated_notes',
+                     'document_inline_publication','document_link_anchors','document_source_fidelity',
+                     'document_layout_review'}:
         assert (args.dist_dir/'document-runtime/src/linguafloat'/path.name).read_bytes()==path.read_bytes()
         checked+=1
         continue
@@ -49,4 +52,6 @@ for name in ("__init__.py", "api_compat.py", "document_context.py", "document_co
 assert (args.dist_dir / "document-runtime/worker_entry.py").read_bytes() == (root / "scripts/document_worker_entry.py").read_bytes()
 for name in ("document_fonts.py", "document_structure.py", "document_navigation.py", "document_postprocess.py", "document_publication.py", "document_publisher_footer.py", "document_masthead.py"):
     assert (args.dist_dir / "document-runtime/src/linguafloat" / name).read_bytes() == (root / "src/linguafloat" / name).read_bytes()
+assert (args.dist_dir / 'document-runtime/src/linguafloat/document_export.py').read_bytes() == (root / 'src/linguafloat/document_export.py').read_bytes()
+assert (args.dist_dir / 'document-runtime/src/linguafloat/document_review.py').read_bytes() == (root / 'src/linguafloat/document_review.py').read_bytes()
 print(f"Portable build verified: {checked} Python modules and 6 image assets match source.")

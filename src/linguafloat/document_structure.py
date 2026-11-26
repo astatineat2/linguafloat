@@ -73,7 +73,12 @@ def _margin_numbers(page):
                 continue
             span = spans[0]
             text = span['text'].strip()
-            if not re.fullmatch(r'[0-9]{1,7}', text) or not 4 <= span['size'] <= 14:
+            folio = re.fullmatch(r'([0-9]{1,7})(?:\s+of\s+([0-9]{1,7}))?', text, re.I)
+            if not folio or not 4 <= span['size'] <= 14:
+                continue
+            total = int(folio[2]) if folio[2] else None
+            number = int(folio[1])
+            if total is not None and (number != page.number + 1 or total != len(page.parent)):
                 continue
             x0, y0, x1, y1 = span['bbox']
             if y1 <= 48:
@@ -82,7 +87,7 @@ def _margin_numbers(page):
                 edge, distance = 'bottom', page.rect.height-span['origin'][1]
             else:
                 continue
-            result.append(dict(text=text, box=list(span['bbox']), font=re.sub(r'^[A-Z]{6}\+', '', span['font']),
+            result.append(dict(text=text, number=number, total=total, box=list(span['bbox']), font=re.sub(r'^[A-Z]{6}\+', '', span['font']),
                                size=span['size'], color=span['color'] & 0xffffff, edge=edge,
                                distance=distance, center=(x0+x1)/2))
     return result
@@ -112,8 +117,11 @@ def _page_numbers(page):
             matches = [r for r in others if r['font'] == candidate['font'] and r['edge'] == candidate['edge']
                        and r['color'] == candidate['color'] and abs(r['size']-candidate['size']) <= .1
                        and abs(r['distance']-candidate['distance']) <= 1
-                       and abs(r['center']-candidate['center']) <= 2]
-            if len(matches) != 1 or int(matches[0]['text'])-int(candidate['text']) != index-page.number:
+                       and r['total'] == candidate['total']
+                       and (abs(r['center']-candidate['center']) <= 2 or
+                            (r['total'] is not None and abs(min(r['box'][0], page.rect.width-r['box'][2]) -
+                                min(candidate['box'][0], page.rect.width-candidate['box'][2])) <= 2))]
+            if len(matches) != 1 or matches[0]['number']-candidate['number'] != index-page.number:
                 break
             sequence.append(dict(page=index+1, text=matches[0]['text']))
         else:
@@ -338,7 +346,7 @@ def split_structures(page, structure):
 
     areas = [area(p['box']) for p in plans]
     restored = [(r['kind'], area(r['glyph_box'], padding=0)) for r in structure.get('preserve', [])
-                if r['kind'] in ('decoration', 'navigation', 'page_number', 'running_metadata')]
+                if r['kind'] in ('decoration', 'navigation', 'page_number', 'running_metadata', 'inline_publication')]
     rebuilt, changes = [], []
     for paragraph in page.pdf_paragraph:
         segments = []
@@ -357,7 +365,7 @@ def split_structures(page, structure):
             keys = []
             for char in chars:
                 token = (char.char_unicode or '').strip()
-                if any(owns(box, char) and (kind in ('navigation', 'page_number', 'running_metadata') or token in _DECORATIONS)
+                if any(owns(box, char) and (kind != 'decoration' or token in _DECORATIONS)
                        for kind, box in restored):
                     keys.append('restored')
                     continue

@@ -256,7 +256,38 @@ def execute(job, key, store, control, emit, translator=None):
                     json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
             from linguafloat.document_postprocess import digest as artifact_digest
             artifact_manifest = publish / FOLDER / "manifest.json"
+            export_record = None
+            export_reason = ''
+            if all(Path(p).suffix.lower()=='.pdf' for p in outputs) and (artifact_manifest.is_file() or (work/'export-pages.json').is_file()):
+                from linguafloat.document_export import MANUSCRIPT, create_manuscript
+                try:
+                    report_path = publish / 'layout-report.json'
+                    report = json.loads(report_path.read_bytes()) if report_path.exists() else {}
+                    artifact_data = json.loads(artifact_manifest.read_bytes()) if artifact_manifest.exists() else {}
+                    if job.workflow == 'body' and artifact_data:
+                        anchors = {k:report.get(k,{}) for k in ('normal_preserved_regions','export_formulas')}
+                        anchors['paragraphs'] = [{k:r[k] for k in ('page','box','role') if k in r} for r in report.get('paragraphs',[])]
+                        anchor_file = artifact_manifest.with_name('export-layout.json')
+                        anchor_file.write_text(json.dumps(anchors,ensure_ascii=False),'utf8')
+                        artifact_data['export_layout_sha256'] = artifact_digest(anchor_file)
+                        artifact_manifest.write_text(json.dumps(artifact_data,ensure_ascii=False,indent=2),'utf8')
+                    if job.workflow == 'graphics':
+                        anchor_file = artifact_manifest.with_name('export-layout.json')
+                        if not anchor_file.is_file() or artifact_digest(anchor_file)!=artifact_data.get('export_layout_sha256'):
+                            raise ValueError('旧正文缺少经过核验的图表边界。')
+                        report.update(json.loads(anchor_file.read_bytes()))
+                    mapping = artifact_data.get('pages') or json.loads((work/'export-pages.json').read_bytes())
+                    mono = Path(outputs[0]) if job.mono else ((work/FOLDER/'body.pdf') if job.workflow=='body' and artifact_data else work/'export-panel.pdf')
+                    export_record = create_manuscript(mono,publish,job.job_id,report,mapping,
+                        outputs=[publish/name for name in names],checkpoint=control.checkpoint)
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    (publish/MANUSCRIPT).unlink(missing_ok=True)
+                    export_reason = f'可编辑导出底稿未生成，PDF 已保留：{exc}'
             graphics_manifest_sha256 = artifact_digest(artifact_manifest) if artifact_manifest.is_file() else ""
+            review_layout = publish / 'layout-report.json'
+            review_layout_sha256 = (artifact_digest(review_layout) if job.workflow == 'body' and review_layout.is_file() else '')
             control.checkpoint()
             publish.rename(target)
             paths = [str(target / name) for name in names]
@@ -267,9 +298,12 @@ def execute(job, key, store, control, emit, translator=None):
         issues = [f"{r['id']} · " + (f"第 {r['page']} 页" if "page" in r else
                   f"{r.get('location', '文档')} 第 {r.get('paragraph', '?')} 段") + " · " + r["reason"] for r in local_issues]
         result = {"outputs": paths, "warnings": warnings, "untranslated_regions": unresolved,
+                  "export_manuscript": export_record,
+                  "export_unavailable": export_reason,
                   "parent_job_id": job.parent_job_id,
                   "graphics_source": str(target / FOLDER) if (target / FOLDER).is_dir() else "",
                   "graphics_manifest_sha256": graphics_manifest_sha256,
+                  "review_layout_sha256": review_layout_sha256,
                   "workflow": job.workflow,
                   "transport_partial": transport_partial,
                   "issues": issues,
@@ -312,6 +346,21 @@ def main():
     with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
         try:
             message = json.loads(sys.stdin.readline())
+            if message.get('operation')=='export_result':
+                from linguafloat.document_export import export_file
+                try:
+                    path, note = export_file(message['identity'],message['info'],message['format'],message['destination'])
+                    emit({'type':'exported','path':str(path),'note':note})
+                except Exception as error:
+                    emit({'type':'error','message':str(error)})
+                return
+            if message.get('operation') == 'review_result':
+                from linguafloat.document_review import run_review
+                try:
+                    run_review(message, emit)
+                except Exception:
+                    emit({'type': 'review_error', 'message': '校对未完成，请核对原 PDF、任务记录及校对接口。PDF 未改动。'})
+                return
             if message.get("operation")=="graphics_preview":
                 from linguafloat.document_graphics import preview_page
                 preview_page(message,emit)

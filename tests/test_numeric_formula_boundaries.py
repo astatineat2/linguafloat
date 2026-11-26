@@ -42,6 +42,24 @@ def test_sentence_decimal_punctuation_never_acquires_next_prose():
     assert all(not s.endswith('.') and 'Compare' not in s for s in formulas)
 
 
+@pytest.mark.parametrize('lexeme,partial', [('=42.06','=42'),('=1.234','=1'),('=-3.25','=-3')])
+def test_assignment_anchor_keeps_its_decimal_tail(lexeme, partial):
+    p, chars=paragraph('Reading '+lexeme+' ppm in sample.',partial)
+    protect_math(p,{'body':'TimesRoman'})
+    formulas=[''.join(c.char_unicode for c in part.pdf_formula.pdf_character).strip()
+              for part in p.pdf_paragraph_composition if part.pdf_formula]
+    assert lexeme in formulas
+    assert [c.pdf_character_id for part in p.pdf_paragraph_composition for c in composition_chars(part)] == [c.pdf_character_id for c in chars]
+
+
+def test_uncertainty_slot_owning_both_partial_values_is_completed_as_one_quantity():
+    p, chars=paragraph('Mean 37.2 ± 6.9 years.', '2 ± 6')
+    protect_math(p,{'body':'TimesRoman'})
+    assert [''.join(c.char_unicode for c in part.pdf_formula.pdf_character).strip()
+            for part in p.pdf_paragraph_composition if part.pdf_formula] == ['37.2 ± 6.9']
+    assert [c.pdf_character_id for part in p.pdf_paragraph_composition for c in composition_chars(part)] == [c.pdf_character_id for c in chars]
+
+
 def test_paint_order_does_not_join_different_lines_as_one_number():
     p, chars=paragraph('Value 0.25 in medium.','25')
     for c in chars[8:10]:

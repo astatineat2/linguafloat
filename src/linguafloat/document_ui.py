@@ -16,9 +16,11 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, Q
     QHeaderView, QLabel, QLineEdit, QProgressBar, QPushButton, QScrollArea, QTextBrowser,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QRadioButton,
     QButtonGroup, QToolButton, QSpinBox, QDoubleSpinBox, QTabWidget, QFrame, QStackedLayout,
-    QDialog, QDialogButtonBox)
+    QDialog, QDialogButtonBox, QInputDialog)
 
 from linguafloat.document_core import DocumentError, DocumentJob, JobStore, LANGUAGES, SUPPORTED, billing_display
+from linguafloat.document_export import choices as export_choices, resolve_result
+from linguafloat.document_review_ui import ReviewPanel
 from linguafloat.theme import COLORS, section_heading, set_state
 from linguafloat.ui_layout import FieldGrid
 
@@ -37,6 +39,26 @@ class TaskProgress(QProgressBar):
         self.label.full_text = text
         self.label.setAccessibleName(text)
         self.label.setText(self.label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, self.label.width()))
+
+
+class ExportSelectionLabel(QLabel):
+    def __init__(self):
+        super().__init__()
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setAccessibleName("选中的译文")
+
+    def set_result(self, text):
+        self.setToolTip(text)
+        self._fit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self):
+        text = self.toolTip() or "未选择结果"
+        self.setText(self.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, self.width()))
 
 
 class TaskSummary(QLabel):
@@ -310,6 +332,52 @@ class DocumentPage(QWidget):
         self.file_tabs.currentChanged.connect(self._sync_column_button)
         self.file_tabs.currentChanged.connect(lambda _: self._column_fit_timer.start(0))
         layout.addWidget(self.file_tabs, 1)
+        self.export_process = None
+        self._export_id = None
+        self._export_pdf = None
+        self._export_records = {}
+        self._export_locations = {}
+        self.export_section = QWidget()
+        export_layout = QVBoxLayout(self.export_section)
+        export_layout.setContentsMargins(0, 0, 0, 0)
+        export_layout.setSpacing(6)
+        export_layout.addWidget(section_heading("译文导出", "mdi6.export-variant"))
+        export_row = QHBoxLayout()
+        self.export_picker = QPushButton("选择历史结果")
+        self.export_picker.setIcon(qta.icon("mdi6.history"))
+        self.export_picker.clicked.connect(self.pick_export_result)
+        export_row.addWidget(self.export_picker)
+        self.export_pdf_picker = QPushButton('选择 PDF')
+        self.export_pdf_picker.setIcon(qta.icon('mdi6.file-find-outline'))
+        self.export_pdf_picker.clicked.connect(self.pick_export_pdf)
+        export_row.addWidget(self.export_pdf_picker)
+        self.export_source = ExportSelectionLabel()
+        export_row.addWidget(self.export_source, 1)
+        self.export_buttons = {}
+        for kind, title, icon in (("pdf", "PDF", "file-pdf-box"), ("word", "Word", "file-word-outline"),
+                                  ("markdown", "Markdown", "language-markdown-outline")):
+            button = QPushButton(title)
+            button.setIcon(qta.icon(f"mdi6.{icon}"))
+            button.clicked.connect(lambda _, kind=kind: self.export_history(kind))
+            self.export_buttons[kind] = button
+            export_row.addWidget(button)
+        export_layout.addLayout(export_row)
+        self.export_status = QLabel()
+        self.export_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.export_status.setObjectName("muted")
+        self.export_status.setWordWrap(True)
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.export_status, 1)
+        self.export_locate = QPushButton("定位结果文件")
+        self.export_locate.setIcon(qta.icon("mdi6.folder-search-outline"))
+        self.export_locate.clicked.connect(self.locate_export_result)
+        status_row.addWidget(self.export_locate)
+        export_layout.addLayout(status_row)
+        layout.addWidget(self.export_section)
+        self.refresh_export_control()
+        self._review_sources = {}
+        self.review = ReviewPanel(self, worker_command)
+        layout.addWidget(self.review)
         self.report = QTextBrowser()
         self.report.setObjectName("taskDetails")
         self.report.setFixedHeight(112)
@@ -324,9 +392,9 @@ class DocumentPage(QWidget):
         self.copy_details.clicked.connect(self.copy_report)
         details_actions.addWidget(self.expand_details)
         details_actions.addStretch()
-        self.graphics_button = QPushButton("图片翻译")
+        self.graphics_button = QPushButton("图表翻译")
         self.graphics_button.setIcon(qta.icon("mdi6.chart-box-outline"))
-        self.graphics_button.setToolTip("从历史正文结果选择任务，确认后单独补译图片文字。")
+        self.graphics_button.setToolTip("从正文结果选择任务，按需补译图内文字和独立表格。")
         self.graphics_button.clicked.connect(self.request_graphics)
         details_actions.addWidget(self.copy_details)
         layout.addLayout(details_actions)
@@ -380,14 +448,14 @@ class DocumentPage(QWidget):
         self.relayout_only = QCheckBox("仅重新排版")
         self.relayout_only.setToolTip("复用已有译文，不调用翻译 API")
         self.translate_graphics=QCheckBox("图片翻译（历史偏好）")
-        self.translate_graphics.setToolTip("兼容旧版偏好；新正文默认翻译独立表格，图片通过底部按钮补译。")
+        self.translate_graphics.setToolTip("兼容旧版偏好；新正文不自动补译图表。")
         self.translate_graphics.hide()  # Retain the old preference; never auto-start graphics.
         options = ActionBar((self.relayout_only,))
         form.add_field("内容处理", options, wide=True)
-        graphics_hint = QLabel("独立表格随正文默认翻译；图内文字保留原文，正文完成后可点击底部“图片翻译”。")
+        graphics_hint = QLabel("图表内部保留原文，独立题注随正文翻译。完成后可按需使用“图表翻译”。")
         graphics_hint.setWordWrap(True)
         graphics_hint.setObjectName("muted")
-        form.add_field("图片处理", graphics_hint, wide=True)
+        form.add_field("图表处理", graphics_hint, wide=True)
         self.pdf_mode.currentIndexChanged.connect(self.refresh_graphics_controls)
         self.refresh_graphics_controls()
         arrangements = QHBoxLayout()
@@ -558,6 +626,8 @@ class DocumentPage(QWidget):
         selected_id = selected.data(0, Qt.ItemDataRole.UserRole) if selected else None
         self.history.blockSignals(True)
         self.history.clear()
+        self._export_records.clear()
+        self._review_sources.clear()
         for identity, source, state, updated, raw in records:
             info = json.loads(raw)
             label = {"completed": "完成", "partial": "部分完成", "failed": "失败", "cancelled": "取消"}.get(state,
@@ -584,6 +654,9 @@ class DocumentPage(QWidget):
             item.setForeground(6, QColor(COLORS[task_tone(label)]))
             item.setData(0, Qt.ItemDataRole.UserRole + 1, info)
             stamp = datetime.fromtimestamp(info.get("started_at", updated)).strftime("%Y-%m-%d %H:%M:%S")
+            if info.get("outputs"):
+                self._export_records[identity] = (Path(source).name, stamp, info)
+                self._review_sources[identity] = source
             detail = f"{source}\n开始时间：{stamp}\n状态：{label}\n耗时：{elapsed_text}（包含暂停；不含排队）"
             detail += f"\n输入 Token：{info.get('input_tokens', '未记录')}\n输出 Token：{info.get('output_tokens', '未记录')}\n合计 Token：{token_text}"
             if unknown:
@@ -629,6 +702,7 @@ class DocumentPage(QWidget):
             self.show_history_details()
         self._column_fit_timer.start(0)
         self.refresh_graphics_controls()
+        self.refresh_export_control()
 
     def show_history_details(self):
         item = self.history.currentItem()
@@ -698,9 +772,241 @@ class DocumentPage(QWidget):
         if outputs and Path(outputs[0]).parent.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(outputs[0]).parent)))
 
+    @staticmethod
+    def export_version(info):
+        return "图表补译版" if info.get("workflow") == "graphics" else "正文版"
+
+    def pick_export_result(self):
+        if not self._export_records:
+            self.show_export_status("没有已保存的历史结果。")
+            return
+        from linguafloat.workbench import AppDialog
+
+        dialog = AppDialog(self)
+        dialog.setWindowTitle("选择历史结果")
+        dialog.resize(min(780, max(570, self.window().width() - 64)), 405)
+        layout = QVBoxLayout(dialog)
+        tree = QTreeWidget()
+        tree.setObjectName("exportHistory")
+        tree.setAccessibleName("历史译文")
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        tree.setUniformRowHeights(True)
+        tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        tree.setHeaderLabels(["文件名", "版本", "开始时间", "可导出格式"])
+        tree.header().setStretchLastSection(False)
+        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in (1, 2, 3):
+            tree.header().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        for identity, (name, stamp, _) in self._export_records.items():
+            info = self.export_result_info(identity)
+            formats = self.export_formats(info, identity)
+            summary = self.export_format_labels(formats) or "结果文件缺失"
+            item = QTreeWidgetItem([name, self.export_version(info), stamp, summary])
+            item.setData(0, Qt.ItemDataRole.UserRole, identity)
+            item.setToolTip(0, name)
+            tree.addTopLevelItem(item)
+            if identity == self._export_id:
+                tree.setCurrentItem(item)
+        if tree.currentItem() is None:
+            tree.setCurrentItem(tree.topLevelItem(0))
+        layout.addWidget(tree, 1)
+        actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        choose = actions.button(QDialogButtonBox.StandardButton.Ok)
+        choose.setText("选择")
+        choose.setObjectName("primary")
+        actions.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        actions.accepted.connect(dialog.accept)
+        actions.rejected.connect(dialog.reject)
+        tree.itemDoubleClicked.connect(lambda *_: dialog.accept())
+        layout.addWidget(actions)
+        if dialog.exec() == QDialog.DialogCode.Accepted and tree.currentItem():
+            self.select_export_result(tree.currentItem().data(0, Qt.ItemDataRole.UserRole))
+
+    def select_export_result(self, identity):
+        self._export_id = identity
+        self._export_pdf = None
+        self.show_export_status("")
+        self.refresh_export_control()
+        self.review.refresh()
+
+    def pick_export_pdf(self):
+        selected, _ = QFileDialog.getOpenFileName(self, '选择 PDF', self.output_dir.text(), 'PDF (*.pdf)')
+        if selected:
+            self._export_id = None
+            self._export_pdf = Path(selected)
+            self.show_export_status('')
+            self.refresh_export_control()
+            self.review.refresh()
+
+    def export_result_info(self, identity):
+        if identity not in self._export_records:
+            return {}
+        info = self._export_records[identity][2]
+        configured = Path(self.output_dir.text())
+        app_root = (Path(sys.executable).parent if getattr(sys, 'frozen', False)
+                    else Path(__file__).resolve().parents[2])
+        roots = (configured, configured.parent, app_root, app_root.parent, app_root.parent.parent)
+        if located := self._export_locations.get(identity):
+            resolved = resolve_result(identity, info, located=located)
+            if resolved is not info:
+                return resolved
+        return resolve_result(identity, info, roots)
+
+    def locate_export_result(self):
+        identity = self._export_id
+        if identity not in self._export_records or self.export_process is not None:
+            return
+        info = self._export_records[identity][2]
+        folder = Path(self.output_dir.text())
+        selected, _ = QFileDialog.getOpenFileName(self, "定位结果文件", str(folder), "译文文件 (*.pdf *.docx)")
+        if not selected:
+            return
+        recovered = resolve_result(identity, info, located=selected)
+        if recovered is info:
+            self.show_export_status("无法核实这是该任务的译文。请选择原任务的结果文件，并保留同目录的任务清单或编辑底稿。")
+            return
+        self._export_locations[identity] = Path(selected)
+        self.refresh_export_control()
+
+    @staticmethod
+    def export_formats(info, identity=None):
+        options = export_choices(info, identity)
+        return {
+            "pdf": {key: entry for key, entry in options.items() if entry[1].lower() == ".pdf"},
+            "word": {"docx": options["docx"]} if "docx" in options else
+                    {key: entry for key, entry in options.items() if entry[1].lower() == ".docx"},
+            "markdown": {"markdown": options["markdown"]} if "markdown" in options else {},
+        }
+
+    @staticmethod
+    def export_format_labels(formats):
+        md = formats["markdown"].get("markdown")
+        labels = ("PDF" if formats["pdf"] else "", "Word" if formats["word"] else "",
+                  ("Markdown (ZIP)" if md[1] == ".zip" else "Markdown") if md else "")
+        return " / ".join(label for label in labels if label)
+
+    def show_export_status(self, text, tooltip=""):
+        self.export_status.setText(text)
+        self.export_status.setToolTip(tooltip)
+        self.export_status.setVisible(bool(text))
+
+    def refresh_export_control(self):
+        identity = self._export_id
+        record = self._export_records.get(identity)
+        pdf = self._export_pdf
+        info = {'outputs': [str(pdf)]} if pdf else self.export_result_info(identity)
+        source = pdf.name if pdf else (f"{record[0]} · {self.export_version(info)}" if record else "")
+        self.export_source.set_result(source)
+        formats = self.export_formats(info, identity)
+        idle = self.export_process is None
+        self.export_picker.setEnabled(idle)
+        self.export_pdf_picker.setEnabled(idle)
+        missing = [Path(path) for path in info.get("outputs", []) if not Path(path).is_file()]
+        self.export_locate.setVisible(bool(missing and record))
+        self.export_locate.setEnabled(idle)
+        for key, button in self.export_buttons.items():
+            button.setEnabled(idle and bool(formats[key]))
+        markdown = formats["markdown"].get("markdown")
+        fallback = bool(markdown and markdown[0].startswith('从 PDF'))
+        self.export_buttons["markdown"].setToolTip("含图片资源时导出 ZIP" if fallback or (markdown and markdown[1] == '.zip') else '')
+        if not idle:
+            return
+        if missing:
+            missing_label = "译文 PDF" if all(path.suffix.lower() == ".pdf" for path in missing) else "译文文件"
+            reason = f"找不到部分{missing_label}。" if any(formats.values()) else f"找不到{missing_label}。"
+            self.show_export_status(reason)
+        elif record and not any(formats.values()):
+            self.show_export_status("没有可另存的结果文件。")
+        elif not record and not pdf:
+            self.show_export_status("")
+        elif not self.export_status.text().startswith(("已导出：", "未导出：", "目标文件已存在")):
+            self.show_export_status('从 PDF 恢复可编辑文本，不重新翻译。' if fallback else
+                                    "可导出：" + self.export_format_labels(formats))
+
+    def export_history(self, format_key):
+        identity = self._export_id
+        record = self._export_records.get(identity)
+        pdf = self._export_pdf
+        if (not record and not pdf) or self.export_process is not None:
+            return
+        info = {'outputs': [str(pdf)]} if pdf else self.export_result_info(identity)
+        options = self.export_formats(info, identity)[format_key]
+        if not options:
+            self.refresh_export_control()
+            return
+        version = self.export_version(info)
+        stem = pdf.stem if pdf else Path(record[0]).stem
+        if len(options) == 1:
+            kind = next(iter(options))
+        else:
+            labels = {f"{i}. {entry[0]}": key for i, (key, entry) in enumerate(options.items(), 1)}
+            label, accepted = QInputDialog.getItem(self, "导出译文", "选择结果文件", list(labels), 0, False)
+            if not accepted:
+                return
+            kind = labels[label]
+        label, suffix = options[kind]
+        if pdf and not kind.startswith('output:'):
+            scopes = {'整页（普通单语 PDF，包括双栏论文）': 'whole', '仅左侧（左右双语 PDF）': 'left',
+                      '仅右侧（左右双语 PDF）': 'right'}
+            chosen, accepted = QInputDialog.getItem(self, '转换范围', '选择要转换的内容', list(scopes), 0, False)
+            if not accepted:
+                return
+            info['pdf_scope'] = scopes[chosen]
+        first = Path(info["outputs"][int(kind.split(":")[1])] if kind.startswith("output:") else info["outputs"][0])
+        name = (f"另存_{label}" if kind.startswith("output:") else
+                (f"{stem}{suffix}" if pdf else f"{stem}.{version}.{identity[:8]}{suffix}"))
+        dest, _ = QFileDialog.getSaveFileName(self, "导出译文", str(first.parent / name),
+                                              f"{suffix[1:].upper()} (*{suffix})", options=QFileDialog.Option.DontConfirmOverwrite)
+        if not dest:
+            return
+        if Path(dest).exists():
+            self.show_export_status("目标文件已存在。原文件未改动。", dest)
+            return
+        process = QProcess(self)
+        self.export_process = process
+        self.refresh_export_control()
+        python, entry = worker_command()
+        process.setProgram(str(python))
+        process.setArguments(["-X", "utf8", str(entry)])
+        request = dict(operation="export_result", identity=identity, format=kind, destination=dest,
+                       info={k: info[k] for k in ("outputs", "export_manuscript", "pdf_scope") if k in info})
+
+        def started():
+            process.write((json.dumps(request) + "\n").encode())
+            process.closeWriteChannel()
+
+        def done(*_):
+            if self.export_process is not process:
+                return
+            try:
+                result = json.loads(bytes(process.readAllStandardOutput()))
+            except (ValueError, UnicodeError):
+                result = {"message": process.errorString() or "未收到导出结果。"}
+            self.export_process = None
+            process.deleteLater()
+            self.refresh_export_control()
+            if result.get("type") == "exported":
+                saved = Path(result.get('path', dest))
+                note = result.get('note', '')
+                self.show_export_status(f"已导出：{saved.name}" + (f"。{note}" if note else ''), str(saved))
+            else:
+                self.show_export_status("未导出：" + result.get("message", "未知错误"))
+
+        process.started.connect(started)
+        process.finished.connect(done)
+        process.errorOccurred.connect(lambda error: done() if error == QProcess.ProcessError.FailedToStart else None)
+        self.show_export_status("正在离线导出…")
+        process.start()
+
     def set_profiles(self, profiles, active_id):
         self.profiles = {p.id: p for p in profiles}
         self.active_id = active_id
+        profile = self.profiles.get(active_id)
+        stamp = (profile.id, profile.base_url, profile.model, profile.api_mode) if profile else None
+        if stamp != getattr(self, '_review_profile', None):
+            self.review.ai.setChecked(False)
+            self._review_profile = stamp
         self.graphics_refresh_requested.emit()
 
     def preferences(self):
@@ -913,6 +1219,7 @@ class DocumentController(QObject):
         self.page, self.settings, self.credentials = page, settings, credentials
         self.database = Path(database)
         page.document_database=self.database
+        page.review.ai_key = self.review_credentials
         self.process = None
         self.queue = []
         self.paused = self.cancelled = self.terminal = False
@@ -974,6 +1281,17 @@ class DocumentController(QObject):
             self.page.set_history(store.history(), self.job.job_id if self.process and self.job else None)
         finally:
             store.close()
+        self.page.review.refresh()
+
+    def review_credentials(self):
+        profile = self.page.profiles.get(self.page.active_id)
+        if not profile:
+            return None
+        try:
+            key = self.credentials.get_api_key(profile.id, profile.env_key)
+        except Exception:
+            return None
+        return (asdict(profile), key) if key else None
 
     def start(self, trial=False):
         if getattr(self, "update_pending", False):
@@ -1007,7 +1325,7 @@ class DocumentController(QObject):
                     workflow="body" if layout_pdf else "legacy",
                     chinese_font=self.page.chinese_font.currentData() if layout_pdf else "",
                     latin_font=self.page.latin_font.currentData() if layout_pdf else "",
-                    translate_tables=layout_pdf,
+                    translate_tables=False,
                     translate_figures=False,
                     graphic_overrides={}, pricing={}, skip_references=True)
                 job.validate()
@@ -1116,21 +1434,25 @@ class DocumentController(QObject):
         try:
             source, info, profile, artifact, manifest = self.graphics_record(identity, strict=True)
             dialog = QDialog(self.page)
-            dialog.setWindowTitle("图片翻译")
+            dialog.setWindowTitle("图表翻译")
             dialog.setMinimumWidth(410)
             layout = QVBoxLayout(dialog)
             when = datetime.fromtimestamp(info['started_at']).strftime('%Y-%m-%d %H:%M:%S')
-            description = QLabel(f"是否对以下正文结果进行图片翻译？\n{Path(source).name}\n"
+            description = QLabel(f"是否对以下正文结果进行图表翻译？\n{Path(source).name}\n"
                 f"任务时间：{when} · {identity[:12]}\n页码范围：{manifest['selected_pages'] or '全部'}\n"
-                "补译范围：图内文字（不重译独立表格）。复用正文、图注和缓存，结果编号另存，不覆盖旧结果。"
-                + ("\n此历史正文未启用独立表格翻译；本次只补译图片，不会自动补译旧版表格。"
-                   if not info.get('configuration', {}).get('translate_tables') else ""))
+                "只处理勾选的内容；保留正文与题注，结果编号另存。")
             description.setWordWrap(True)
             description.setTextFormat(Qt.TextFormat.PlainText)
             layout.addWidget(description)
             figures = QCheckBox("图内文字")
             figures.setChecked(self.page.graphics_figures)
             layout.addWidget(figures)
+            tables = QCheckBox("独立表格")
+            tables.setEnabled(manifest.get('table_policy') != 'independent-tables-v1')
+            tables.setChecked(tables.isEnabled() and self.page.graphics_tables)
+            if not tables.isEnabled():
+                tables.setToolTip("此历史正文已处理过表格，不重复覆盖。")
+            layout.addWidget(tables)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No)
             yes = buttons.button(QDialogButtonBox.StandardButton.Yes)
             yes.setText("是")
@@ -1138,8 +1460,9 @@ class DocumentController(QObject):
             custom = buttons.addButton("自定义文件", QDialogButtonBox.ButtonRole.ActionRole)
             custom.clicked.connect(lambda: dialog.done(2))
             def scope_changed():
-                yes.setEnabled(figures.isChecked())
+                yes.setEnabled(figures.isChecked() or tables.isChecked())
             figures.toggled.connect(scope_changed)
+            tables.toggled.connect(scope_changed)
             scope_changed()
             buttons.accepted.connect(dialog.accept)
             buttons.rejected.connect(dialog.reject)
@@ -1164,13 +1487,15 @@ class DocumentController(QObject):
                 chinese_font=manifest["chinese_font"], latin_font=manifest["latin_font"],
                 mono=manifest["mono"], bilingual=manifest["bilingual"], bilingual_layout=manifest["bilingual_layout"],
                 skip_references=manifest["skip_references"], reference_boundary=manifest["reference_boundary"],
-                translate_figures=figures.isChecked(), translate_tables=False,
+                translate_figures=figures.isChecked(), translate_tables=tables.isChecked(),
                 request_timeout=profile.document_timeout, job_id=uuid.uuid4().hex)
             job.validate()
             python, entry = worker_command()
             if not python.is_file() or not entry.is_file():
                 raise DocumentError("完整文档运行环境缺失。")
             self.page.graphics_figures = figures.isChecked()
+            if tables.isEnabled():
+                self.page.graphics_tables = tables.isChecked()
             self.page.preferences_changed.emit(self.page.preferences())
             self.page.add_files([source])
             item = next(self.page.files.topLevelItem(i) for i in range(self.page.files.topLevelItemCount())
@@ -1347,6 +1672,10 @@ class DocumentController(QObject):
             if paths:
                 self.page.last_output = str(Path(paths[0]).parent)
                 self.item.setData(1, Qt.ItemDataRole.UserRole, self.page.last_output)
+                if (self.job.workflow == 'body' and self.job.source_language == 'en' and self.job.target == 'zh-Hans'
+                        and Path(self.job.source).suffix.lower() == '.pdf'):
+                    self.page.review.enqueue(self.job.job_id, self.job.source, event,
+                                             allow_ai=not self.job.relayout_only)
             if self.page.file_tabs.currentIndex() == 0:
                 self.page.show_details(self.row_id)
         elif kind in {"error", "cancelled"}:
@@ -1483,6 +1812,7 @@ class DocumentController(QObject):
             self.page.set_busy(False)
 
     def shutdown(self):
+        self.page.review.shutdown()
         if self.process:
             self.cancel()
             if self.process and not self.process.waitForFinished(1500):

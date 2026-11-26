@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $Compiler -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $inputScript -PathType Leaf)) {
     throw 'Build the complete portable snapshot first using build_distribution.py.'
 }
-$existing = Get-ChildItem -LiteralPath $distribution -Filter '*-setup-*.exe' -File
+$existing = Get-ChildItem -LiteralPath $distribution -Filter '*-Setup.exe' -File
 if ($existing) { throw 'Installer already exists. Use a new distribution build directory.' }
 & $Compiler /Qp $inputScript
 if ($LASTEXITCODE -ne 0) { throw "Installer compiler failed: $LASTEXITCODE" }

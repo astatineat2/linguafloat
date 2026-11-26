@@ -190,8 +190,8 @@ class DocumentJob:
     def validate(self):
         if self.workflow not in {"legacy", "body", "graphics"}:
             raise DocumentError("文档处理流程无效。")
-        if self.workflow == "body" and self.translate_figures:
-            raise DocumentError("正文任务不自动翻译图片，请在正文完成后点击“图片翻译”。")
+        if self.workflow == "body" and (self.translate_figures or self.translate_tables):
+            raise DocumentError("正文任务不自动翻译图表，请在正文完成后使用“图表翻译”。")
         if self.workflow == "graphics" and (not self.parent_job_id or not self.graphics_source
                 or not (self.translate_figures or self.translate_tables) or self.pdf_mode != "layout"):
             raise DocumentError("图表补译需要已完成的正文任务和至少一种图表内容。")
@@ -379,6 +379,7 @@ class DocumentTranslator:
         self.location = "文档"
         self.graphic_failure = None
         self.retries = max(0, min(3, int(self.provider.get("retries", 2))))
+        self.content_repairs = max(0, min(3, int(self.provider.get("formula_content_repairs", 2))))
         self.token_usage = dict(input_tokens=0, output_tokens=0, total_tokens=0,
                                unreported_requests=0, reported_requests=0)
         from linguafloat.document_context import SourceContext, GraphicContext
