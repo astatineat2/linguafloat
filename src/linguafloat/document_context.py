@@ -91,6 +91,8 @@ def request_source(messages):
             return "\n".join(v["input"] for v in data if isinstance(v.get("input"), str))
         if text.startswith("{"):
             data = json.loads(text)
+            if isinstance(data.get("isolated_fragment"), str):
+                return ""
             if isinstance(data.get("fragment"), str):
                 return data["fragment"]
             if isinstance(data.get("fragments"), list):

@@ -15,6 +15,61 @@ def job_for(path, **kwargs):
         job_id="test-job", **kwargs)
 
 
+@pytest.mark.parametrize("status,supplier_code,parameter,primed,retries,rejections,expected", [
+    (400, "invalid_request", "", True, 2, 1, 2),
+    (400, "invalid_request", "", True, 2, 3, 2),
+    (400, "invalid_request", None, False, 2, 1, 1),
+    (400, "invalid_request", "input", True, 2, 1, 1),
+    (400, "invalid_request", "", True, 0, 1, 1),
+    (400, "context_length_exceeded", "", True, 2, 1, 1),
+    (401, "invalid_request", "", True, 2, 1, 1),
+])
+def test_ambiguous_responses_rejection_is_retried_at_most_once(
+        tmp_path, monkeypatch, status, supplier_code, parameter, primed, retries, rejections, expected):
+    import httpx
+    from openai import OpenAI
+    from linguafloat.document_core import DocumentRequestError
+
+    payloads = []
+    def response(req):
+        payload = req.content
+        if b"affected" in payload:
+            payloads.append(payload)
+            if len(payloads) <= rejections:
+                return httpx.Response(status, json={"error": {
+                    "type": "invalid_request_error", "code": supplier_code,
+                    "param": parameter, "message": "The request could not be processed."}})
+        return httpx.Response(200, json={"status": "completed", "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": "translation"}]}]})
+
+    job = job_for(tmp_path / "paper.pdf")
+    job.provider["retries"] = retries
+    with OpenAI(api_key="offline", base_url=job.provider["base_url"], max_retries=0,
+                http_client=httpx.Client(transport=httpx.MockTransport(response))) as client:
+        store = JobStore(tmp_path / "recovery.sqlite")
+        try:
+            t = DocumentTranslator(job, "offline", store, JobControl(), lambda _: None, client)
+            monkeypatch.setattr(t, "wait", lambda _: None)
+            if primed:
+                assert t.request(t.messages("earlier segment")) == "translation"
+            affected = t.messages("affected segment")
+            if expected > rejections:
+                assert t.request(affected) == "translation"
+                assert t.fatal_error is None
+                job.relayout_only = True
+                assert t.request(affected) == "translation"
+            else:
+                with pytest.raises(DocumentRequestError):
+                    t.request(affected)
+                assert t.fatal_error is not None
+                assert store.get(t.cache_key(affected)) is None
+            assert len(payloads) == expected and all(p == payloads[0] for p in payloads)
+            events = [json.loads(row[0]) for row in store.db.execute("SELECT details FROM request_events")]
+            assert sum(e["state"] == "retry" and e.get("http_status") == 400 for e in events) == expected - 1
+        finally:
+            store.close()
+
+
 def test_formula_fragment_uses_context_cache_and_relayout_never_sends(tmp_path):
     calls = []
     def create(**kwargs):

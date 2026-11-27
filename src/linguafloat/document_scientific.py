@@ -766,6 +766,31 @@ def _numeric_difference(source, text, problem):
     return f'原文有、候选缺：{display(before-after)}；候选多出：{display(after-before)}'
 
 
+_REPAIR_NUMBER = re.compile(r'\[\[Q(\d+)\]\]')
+
+
+def _lock_repair_numbers(source):
+    values = []
+
+    def replace(match):
+        if match[0].startswith('<'):
+            return match[0]
+        index = len(values)
+        values.append(match[0])
+        return f'[[Q{index}]]'
+
+    return re.sub(r'<[^>]+>|(?:(?<![A-Za-z0-9.])[-+\u2212])?'
+                  r'(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+\u2212]?\d+)?(?:\s*[%\uff05])?',
+                  replace, source), values
+
+
+def _restore_repair_numbers(text, values):
+    if not isinstance(text, str) or _REPAIR_NUMBER.findall(text) != [str(i) for i in range(len(values))]:
+        return None
+    result = _REPAIR_NUMBER.sub(lambda match: values[int(match[1])], text)
+    return None if '[[Q' in result else result
+
+
 def _formula_fragment_problem(source, text, tokens):
     if not isinstance(text, str):
         return "片段译文不是文字"
@@ -1041,19 +1066,39 @@ def translate_formula_segments(translate_input, translator):
                 'Keep the crystal structure of the named entity as the subject, not the entity alone. Include 晶体结构 (or 晶體結構) in its first sentence.')
         if constraints: single[0]['content']+=' '+' '.join(c for c in constraints if c.startswith(f'Fragment {identity}:'))
         text = values[identity]
+        context_repair_tried = False
         while problem:
             diff = _numeric_difference(source, text, problem)
-            evidence = f'片段 {identity}'+('；'+diff if diff else '')
+            if diff or not evidence:
+                evidence = f'片段 {identity}'+('；'+diff if diff else '')
             reserve(f"片段 {identity}：{problem}")
-            if diff:
-                single[1]['content'] = json.dumps(dict(fragment=source, context=translate_input.unicode[:6000], numeric_check=diff),ensure_ascii=False)
-            text = translator.request(single, budget=budget, part=f"公式间文字补译 · 片段 {identity}")
+            request = single
+            locked = None
+            if diff and context_repair_tried and '[[Q' not in source:
+                # Do not repeat the same prompt or expose rejected numbers to the model.
+                masked, locked = _lock_repair_numbers(source)
+                request = translator.messages('')
+                request[0]['content'] += (
+                    ' Translate only the isolated_fragment field as plain text, even if it is part of a sentence. '
+                    ' Copy each [[Qn]] marker exactly once, in order; it stands for an immutable original number. '
+                    ' Never substitute a numeral for a marker and never introduce new numbers. '
+                    ' Preserve units, tags, scientific names, and every clause exactly in meaning. '
+                    ' The surrounding text is already present. Do not add a list number, heading, or explanation.')
+                request[1]['content'] = json.dumps(dict(isolated_fragment=masked), ensure_ascii=False)
+            else:
+                if diff:
+                    single[1]['content'] = json.dumps(dict(fragment=source, context=translate_input.unicode[:6000], numeric_check=diff),ensure_ascii=False)
+                context_repair_tried = True
+            text = translator.request(request, budget=budget, part=f"公式间文字补译 · 片段 {identity}")
             checkpoint()
-            problem = problem_for(item, text)
+            if locked is not None:
+                text = _restore_repair_numbers(text, locked)
+            problem = ('片段数值标记缺失、重复或顺序变化' if locked is not None and text is None
+                       else problem_for(item, text))
             if not problem and text.lstrip().startswith(("```", '[{', '{"')):
                 problem = "单片段补译未返回纯文本"
             if problem:
-                discard(single)
+                discard(request)
             else:
                 values[identity] = text
                 evidence = ''

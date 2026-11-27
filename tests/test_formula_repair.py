@@ -84,6 +84,39 @@ def test_zero_network_retries_records_numeric_difference_on_exhaustion(translato
     assert '5%' in reason and '50%' in reason and '片段 0' in reason
 
 
+def test_repeated_numeric_contamination_uses_isolated_fragment(translator):
+    from linguafloat.document_context import request_source
+
+    original = formula_input("The lower layer {v1} showed 3 times lower resistance.")
+    calls = []
+
+    def request(messages, **kwargs):
+        packet = json.loads(messages[1]['content'])
+        calls.append(packet)
+        if 'isolated_fragment' in packet:
+            assert packet == {'isolated_fragment': ' showed [[Q0]] times lower resistance.'}
+            assert request_source(messages) == ''
+            return '的电阻降低了 [[Q0]] 倍。'
+        if 'fragments' in packet:
+            return json.dumps([dict(id=0, output='下层'), dict(id=2, output='1. 电阻降低了 3 倍。')])
+        return '1. 电阻降低了 3 倍。'
+
+    translator.request = request
+    assert translate_formula_segments(original, translator) == '下层{v1}的电阻降低了 3 倍。'
+    assert len(calls) == 3
+
+
+def test_isolated_numeric_retry_rejects_missing_reordered_and_duplicate_values():
+    from linguafloat.document_scientific import _lock_repair_numbers, _restore_repair_numbers
+
+    masked, values = _lock_repair_numbers('<style id="1">changed from -0.5 to 87%</style>')
+    assert masked == '<style id="1">changed from [[Q0]] to [[Q1]]</style>'
+    assert _restore_repair_numbers('<style id="1">从[[Q0]]变为[[Q1]]</style>', values) == (
+        '<style id="1">从-0.5变为87%</style>')
+    for invalid in ('[[Q0]]', '[[Q1]] [[Q0]]', '[[Q0]] [[Q1]] [[Q1]]', '[[Q0]] [[Q1]] [[Q2]]'):
+        assert _restore_repair_numbers(invalid, values) is None
+
+
 def test_cancellation_before_repair_stops_new_requests(translator):
     calls = []
     def request(messages, **kwargs):
@@ -155,27 +188,38 @@ def test_bad_identity_retries_batch_without_guessing_map(translator):
     assert len(calls) == 2 and all("fragments" in c for c in calls)
 
 
-def test_real_adapter_recovery_cache_survives_relayout(tmp_path):
+def test_real_adapter_recovery_cache_survives_relayout(tmp_path, monkeypatch):
+    import httpx
+    from openai import BadRequestError
     from linguafloat.document_core import DocumentTranslator
     from test_document_core import job_for
     calls = []
     def create(**kwargs):
         calls.append(kwargs)
+        if len(calls) == 1:
+            return NS(output_text="initial body translation")
+        if len(calls) == 2:
+            raise BadRequestError("The request could not be processed.",
+                response=httpx.Response(400, request=httpx.Request("POST", "https://example.com/v1/responses")),
+                body={"error": {"type": "invalid_request_error", "code": "invalid_request", "param": ""}})
         return NS(output_text=('[{"id":0,"output":"由于{v1}"},{"id":2,"output":"位于"}]'
-                               if len(calls) == 1 else "由于"))
+                               if len(calls) == 3 else "由于"))
     job = job_for(tmp_path / "paper.pdf")
     job.provider["retries"] = 2
     store = JobStore(tmp_path / "real-adapter.sqlite")
     try:
         t = DocumentTranslator(job, "offline", store, JobControl(), lambda _: None,
                               NS(responses=NS(create=create)))
+        monkeypatch.setattr(t, "wait", lambda _: None)
+        assert t.request(t.messages("Earlier body paragraph")) == "initial body translation"
         assert translate_formula_segments(formula_input(), t) == "由于{v1}位于{v2}"
-        assert t.calls == 2
+        assert t.calls == 3 and calls[1] == calls[2]
         job.relayout_only = True
         assert translate_formula_segments(formula_input(), t) == "由于{v1}位于{v2}"
-        assert t.calls == 2 and t.hits == 1 and len(calls) == 2
+        assert t.calls == 3 and t.hits == 1 and len(calls) == 4
         records = [json.loads(row[0]) for row in store.db.execute("SELECT details FROM request_events")]
-        assert sum(e["state"] == "success" for e in records) == 2
+        assert sum(e["state"] == "success" for e in records) == 3
+        assert sum(e["state"] == "retry" and e.get("http_status") == 400 for e in records) == 1
     finally:
         store.close()
 

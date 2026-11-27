@@ -605,6 +605,7 @@ class DocumentTranslator:
         except ApiResponseError as exc:
             raise DocumentRequestError(f"{label} · 请求 {identity}：{exc}") from None
         attempt = 0
+        retried_ambiguous_rejection = False
         while True:
             started = active_clock(self.control)
             last_notice = [0.0]
@@ -690,7 +691,16 @@ class DocumentTranslator:
                     self.gate.backoff(delay, rate_limited=code == 429)
                 if timed_out and adaptive:
                     raise DocumentRequestError(f"{label} · 请求 {identity}：{reason}", timeout=True, details=details) from None
+                # Some Responses gateways reject individual requests without naming
+                # a parameter. Only probe once, after this job has received a valid reply.
+                ambiguous_rejection = (code == 400 and self.provider.get("api_mode") == "responses"
+                    and details.get("supplier_error_type") == "invalid_request_error"
+                    and details.get("supplier_error_code") == "invalid_request"
+                    and not details.get("parameter") and not retried_ambiguous_rejection
+                    and self.calls > 0)
+                retryable = retryable or ambiguous_rejection
                 if retryable and budget[0] > 0 and delay <= 120:
+                    retried_ambiguous_rejection |= ambiguous_rejection
                     budget[0] -= 1
                     attempt += 1
                     self.trace_request(identity, "retry", label, digest, request_started, attempt,
