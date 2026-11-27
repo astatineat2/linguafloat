@@ -36,7 +36,9 @@ def diagnostic(error, stage):
                  "片段格式标签丢失、增加或顺序变化", "片段格式标签丢失、增加或嵌套关系变化", "片段小数、百分比或数量级发生变化",
                  "片段正文数值发生变化", "构型前缀后误接了编号而非酶名", "跨公式重组后遗漏了晶体结构主语", "片段中的科学缩写缺失", "比较分句中显著升高的限定或方向缺失", "片段末尾括号内的科学缩写错位",
                  "补译响应不是有效 JSON", "片段数量不匹配", "片段编号缺失、重复或不匹配",
-                 "单片段补译未返回纯文本", "片段数值标记缺失、重复或顺序变化")
+                 "单片段补译未返回纯文本", "片段数值标记缺失、重复或顺序变化",
+                 "重组后的公式标记丢失、增加或顺序变化", "重组后引文上标错位",
+                 "重组后引文上标前的数值边界改变", "重组后跨公式的小数边界改变")
     reason += next(("：" + value for value in specifics if value in str(error)), "")
     if isinstance(error, DocumentError) and getattr(error, 'fragment_evidence', ''):
         reason += '；' + error.fragment_evidence

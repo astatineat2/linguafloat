@@ -4,8 +4,84 @@ from zipfile import ZipFile
 import pymupdf as fitz
 import pytest
 from docx import Document
+from docx.oxml.ns import qn
 
 from linguafloat.document_export import create_manuscript, choices, export_file
+
+
+@pytest.mark.parametrize('with_manuscript', [True, False])
+def test_word_routes_use_editable_academic_styles(tmp_path, with_manuscript):
+    source = tmp_path / 'academic.pdf'
+    with fitz.open() as pdf:
+        pdf.set_metadata({'title': 'A Study of Spin'})
+        page = pdf.new_page(width=500, height=680)
+        for y, text, size, font in [
+            (60, 'A Study of Spin', 19, 'hebo'), (105, 'Abstract', 13, 'hebo'),
+            (130, 'The sample contained 30 g and a link.', 9, 'helv'),
+            (160, 'Keywords: spin, oxide', 9, 'helv'), (210, '1. Results', 15, 'hebo'),
+            (250, '1.1. Materials', 13, 'hebo'), (290, '1.1.1. Films', 12, 'hebo'),
+            (335, 'Figure 1. Result', 8, 'helv'),
+        ]:
+            page.insert_text((42, y), text, fontsize=size, fontname=font)
+        page.insert_text((42, 310), '\u6d4b\u91cf\u539a\u5ea6', fontname='china-s', fontsize=7)
+        pdf.save(source)
+    info = dict(outputs=[str(source)])
+    if with_manuscript:
+        info['export_manuscript'] = create_manuscript(source, tmp_path, 'job', {}, [dict(source=0,start=0,count=1)])
+    target = tmp_path / 'academic.docx'
+    export_file('job', info, 'docx', target)
+    doc = Document(target)
+    by_text = {p.text: p for p in doc.paragraphs}
+    for text, role, size, chinese in [
+        ('A Study of Spin', 'Title', 16, 'SimHei'), ('Abstract', None, 14, 'SimSun'),
+        ('The sample contained 30 g and a link.', None, 14, 'SimSun'),
+        ('Keywords: spin; oxide', None, 14, 'SimSun'),
+        ('1. Results', 'Heading 1', 14, 'SimSun'), ('1.1. Materials', 'Heading 2', 12, 'SimSun'),
+        ('1.1.1. Films', 'Heading 3', 12, 'SimSun'), ('Figure 1. Result', 'Caption', 7.5, 'SimSun'),
+        ('\u6d4b\u91cf\u539a\u5ea6', 'Normal', 12, 'SimSun'),
+    ]:
+        p = by_text[text]
+        if role:
+            assert p.style.name == role
+        assert p.style.font.size.pt == size
+        fonts = p.style.element.xpath('./w:rPr/w:rFonts')[0]
+        assert fonts.get(qn('w:eastAsia')) == chinese
+        assert fonts.get(qn('w:ascii')) == fonts.get(qn('w:hAnsi')) == 'Times New Roman'
+        assert not any('theme' in name.lower() for name in fonts.attrib)
+        assert str(p.style.font.color.rgb) == '000000'
+    assert doc.styles['Normal'].paragraph_format.line_spacing == 1.5
+    margin = doc.sections[0]
+    assert (round(margin.top_margin.cm, 2), round(margin.left_margin.cm, 2)) == (2.54, 3.17)
+    assert by_text['Abstract'].runs[0].style.font.bold
+    assert by_text['Abstract'].runs[0].style.font.size.pt == 14
+
+
+def test_word_clears_false_raised_prose_but_preserves_scientific_scripts():
+    from io import BytesIO
+    from linguafloat.document_export import _write
+
+    def run(text, flags=0, subscript=False, uri=None):
+        return dict(text=text, flags=flags, subscript=subscript, uri=uri)
+
+    spans = [run('RuO'), run('2', subscript=True), run(' x', 2), run('24', 1),
+             run(' '), run('\u6d4b\u91cf\u503c\u4e3a', 1), run('0.36 nm', 1),
+             run('RuO', 1), run('2', 1, subscript=True), run(' = 0.5 nm', 1),
+             run('\u63a5\u8fd1\u53c2\u8003\u503c', 1), run(' '),
+             run('DOI', uri='https://doi.org/10.0000/example'), run(' x+\U0001d709\U0001d447')]
+    out = BytesIO()
+    _write(None, dict(pages=[dict(source_page=1, blocks=[dict(kind='paragraph', runs=spans)])], issues={}), 'docx', out, False)
+    paragraph, = Document(out).paragraphs
+    assert paragraph.text == ''.join(s['text'] for s in spans)
+    assert paragraph.runs[1].font.subscript
+    assert paragraph.runs[2].italic
+    assert paragraph.runs[3].font.superscript
+    assert all(not r.font.superscript for r in paragraph.runs[5:11])
+    assert paragraph.runs[8].font.subscript
+    assert not paragraph.runs[9].font.subscript
+    assert paragraph.hyperlinks[0].url == 'https://doi.org/10.0000/example'
+    assert paragraph.runs[-2].text == ' x+'
+    assert paragraph.runs[-1].text == '\U0001d709\U0001d447'
+    assert paragraph.runs[-1].style.font.name == 'Cambria Math'
 
 
 def test_pdf_only_history_exports_translation_columns(tmp_path):
@@ -22,6 +98,23 @@ def test_pdf_only_history_exports_translation_columns(tmp_path):
     assert 'docx' in choices(info, 'job')
     export_file('job', info, 'docx', target)
     assert [p.text for p in Document(target).paragraphs] == ['Left column', 'Right column']
+
+
+def test_word_places_a_matched_table_title_above_editable_three_line_table():
+    from io import BytesIO
+    from linguafloat.document_export import _write
+
+    blocks = [dict(kind='table', box=[20, 20, 240, 90], rows=[['Sample', 'Value'], ['A', '30']]),
+              dict(kind='caption', box=[20, 94, 140, 101], runs=[dict(text='Table 1. Values', flags=0, uri=None)])]
+    out = BytesIO()
+    _write(None, dict(pages=[dict(source_page=1, blocks=blocks)], issues={}), 'docx', out, False)
+    doc = Document(out)
+    assert [node.tag for node in doc.element.body[:2]] == [qn('w:p'), qn('w:tbl')]
+    table, = doc.tables
+    assert [[cell.text for cell in row.cells] for row in table.rows] == blocks[0]['rows']
+    assert table._tbl.xpath('./w:tblPr/w:tblBorders/w:top/@w:val') == ['single']
+    assert table._tbl.xpath('./w:tblPr/w:tblBorders/w:insideV/@w:val') == ['nil']
+    assert table.cell(0, 0)._tc.xpath('./w:tcPr/w:tcBorders/w:bottom/@w:val') == ['single']
 
 
 def fixture(tmp_path, artwork=True):

@@ -31,7 +31,8 @@ def main():
     (destination / "python313._pth").write_text(".\nDLLs\nLib\nLib/site-packages\nimport site\n", encoding="ascii")
     target_source = destination / "src" / "linguafloat"
     target_source.mkdir(parents=True, exist_ok=True)
-    for name in ('document_export.py','document_panel_text.py','document_clip.py','document_reviewed.py','document_glyph_patch.py',
+    for name in ('document_export.py','document_word_export.py','document_review.py',
+                 'document_panel_text.py','document_clip.py','document_reviewed.py','document_glyph_patch.py',
                  'document_accents.py','document_scan_consensus.py','document_rotated_notes.py',
                  'document_inline_publication.py','document_link_anchors.py','document_source_fidelity.py'):
         shutil.copy2(project/'src'/'linguafloat'/name,target_source/name)

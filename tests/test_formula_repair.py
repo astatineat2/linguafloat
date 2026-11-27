@@ -376,6 +376,63 @@ def test_decimal_prefix_stays_with_native_fraction_during_repair(translator):
     assert translate_formula_segments(ti,translator)=='在 1234.{v1}处记录吸收。'
 
 
+@pytest.mark.parametrize('source, glyphs, first, last', [
+    ("Growth parameters are shown in Table <style id='13'>1</style>.", ' A1 nm Co ',
+     "生长参数见表 <style id='13'>1</style>。", '层用于确保垂直磁各向异性。'),
+    ('The measurements follow protocol 2.', ' Ag(111) ',
+     '测量遵循方案2。', '是所用的基底。'),
+    ('The measurements follow protocol 2.', ' 1 nm Co ',
+     '测量遵循方案2。', '用于各组样品。'),
+])
+def test_sentence_stop_before_native_science_is_not_a_decimal(translator, source, glyphs, first, last):
+    token = '{v1}'
+    ti = NS(unicode=source + token + 'was used in these measurements.', placeholders=[
+        FormulaPlaceholder(1, NS(pdf_character=[NS(char_unicode=glyphs)], y_offset=0), token, '')])
+    translator.job.target = 'zh-Hans'
+    calls = []
+
+    def request(messages, **kwargs):
+        calls.append(json.loads(messages[1]['content']))
+        return json.dumps([dict(id=0, output=first), dict(id=2, output=last)])
+
+    translator.request = request
+    assert translate_formula_segments(ti, translator) == first + token + last
+    assert len(calls) == 1
+
+
+def test_unlisted_unit_does_not_leave_a_real_decimal_prefix_unprotected(translator):
+    from linguafloat.document_scientific import check_formula_tokens
+
+    token = '{v1}'
+    ti = NS(unicode='The pressure was 54.' + token + 'during the run.', placeholders=[
+        FormulaPlaceholder(1, NS(pdf_character=[NS(char_unicode='5 kPa')], y_offset=0), token, '')])
+    translator.job.target = 'zh-Hans'
+
+    def request(messages, **kwargs):
+        packet = json.loads(messages[1]['content'])
+        assert packet['fragments'][0]['input'] == 'The pressure was '
+        return json.dumps([dict(id=0, output='压力为'), dict(id=2, output='，此值在实验期间保持不变。')])
+
+    translator.request = request
+    assert translate_formula_segments(ti, translator) == '压力为54.' + token + '，此值在实验期间保持不变。'
+    assert not check_formula_tokens(ti, '压力为54。' + token)
+    assert not check_formula_tokens(ti, '压力为45.' + token)
+
+
+def test_reports_a_broken_decimal_link_separately_from_missing_formula_markers(translator):
+    from linguafloat.document_failures import diagnostic
+
+    source = "The pressure was <style id='2'>54.</style>{v1} during the run."
+    ti = NS(unicode=source, placeholders=[FormulaPlaceholder(
+        1, NS(pdf_character=[NS(char_unicode='5 kPa')], y_offset=0), '{v1}', '')])
+    translator.job.target = 'zh-Hans'
+    translator.request = lambda *args, **kwargs: json.dumps([
+        dict(id=0, output="压力为<style id='2'>54。</style>"), dict(id=2, output='，实验期间保持不变。')])
+    with pytest.raises(DocumentError, match='重组后跨公式的小数边界改变') as error:
+        translate_formula_segments(ti, translator)
+    assert diagnostic(error.value, '翻译/公式校验')['reason'].endswith('重组后跨公式的小数边界改变')
+
+
 def test_isotope_labels_qualify_the_measurement_not_the_sample():
     from linguafloat.document_scientific import attach_measurement_nucleus
     ti=NS(unicode='with{v1}NMR spectrum of AB-2, the signal',placeholders=[

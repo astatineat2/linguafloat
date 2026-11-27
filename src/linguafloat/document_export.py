@@ -64,12 +64,14 @@ def _page(page, paragraphs, regions, archive, assets, clip=None):
     if clip is not None:
         visible &= clip
     tables=[]
+    formulas=[]
     for r in regions:
         if r.get('preserve_reason') in {'identifier','page_number','running_metadata'}: continue
         box = (f.Rect(r['box']) * page.transformation_matrix) & visible
         if not box.is_empty:
             art.append(box)
             if r.get('area_kind')=='table': tables.append(box)
+            if r.get('word_role')=='formula': formulas.append(box)
     for r in paragraphs:
         if r.get('box'):
             anchors.append((f.Rect(r['box']) * page.transformation_matrix, r.get('role','')))
@@ -97,6 +99,8 @@ def _page(page, paragraphs, regions, archive, assets, clip=None):
                 items.append(dict(kind='table',box=list(box),rows=cells)); continue
         name=_image_asset(page,box,archive,assets)
         items.append(dict(kind='image',box=list(box),asset=name,links=list(dict.fromkeys(uri for b,uri in links if box.contains((b.tl+b.br)*.5)))))
+        if box in formulas:
+            items[-1]['word_role'] = 'formula'
     blocks = page.get_text('rawdict', flags=f.TEXTFLAGS_RAWDICT & ~f.TEXT_PRESERVE_IMAGES, clip=visible)['blocks']
     for idx, block in enumerate(blocks):
         for line in block.get('lines',[]):
@@ -139,7 +143,13 @@ def _page(page, paragraphs, regions, archive, assets, clip=None):
                 runs.append(run); last=b
         text=''.join(r['text'] for r in runs).strip(); role=anchors[key[1]][1] if key[0]=='anchor' else ''
         kind='caption' if 'caption' in role or re.match(r'^(?:图|表|Figure|Table)\s*\d+[.．:：\s]',text,re.I) else 'heading' if role=='title' else 'paragraph'
-        items.append(dict(kind=kind,box=list(box),runs=runs))
+        item = dict(kind=kind,box=list(box),runs=runs)
+        metadata_title = ((page.parent.metadata or {}).get('title') or '').strip() if page.number == 0 else ''
+        if metadata_title and ' '.join(text.split()).casefold() == ' '.join(metadata_title.split()).casefold():
+            item['word_role'] = 'main_title'
+        elif role in {'main_title', 'subtitle', 'author', 'affiliation', 'abstract', 'keywords', 'heading1', 'heading2', 'heading3'}:
+            item['word_role'] = role
+        items.append(item)
     if not items and (page.get_drawings() or page.get_text().strip()):
         raise ValueError(f'第 {page.number+1} 页无法可靠分离正文。')
     return _ordered(items, visible.width, visible.x0)
@@ -172,7 +182,7 @@ def create_manuscript(mono, directory, identity, report, mapping, *, outputs=Non
         if set(indexes)!=set(range(len(doc))): raise ValueError('正文底稿页码映射不完整。')
         for i,page in enumerate(doc):
             checkpoint(); src,first=indexes[i]; regions=report.get('normal_preserved_regions',{}).get(str(src),[]) if first else []
-            if first: regions=regions+report.get('export_formulas',{}).get(str(src),[])
+            if first: regions=regions+[dict(r, word_role='formula') for r in report.get('export_formulas',{}).get(str(src),[])]
             items=_page(page,paragraphs[src] if first else [],regions,archive,assets)
             pages.append(dict(source_page=src+1,blocks=items))
         if not any(b.get('runs') for p in pages for b in p['blocks']): raise ValueError('没有可验证的可编辑正文。')
@@ -367,69 +377,49 @@ def _md_text(t):
 
 
 def _write(archive, manifest, kind, handle, packed):
-    from docx import Document
-    from docx.shared import Pt
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-    from docx.opc.constants import RELATIONSHIP_TYPE as RT
-    doc=Document() if kind=='docx' else None; lines=[]; assets=set()
+    if kind == 'docx':
+        from linguafloat.document_word_export import write_word
+        write_word(archive, manifest, handle)
+        return
+    lines=[]; assets=set()
     for page in manifest['pages']:
         for b in page['blocks']:
             if b['kind']=='table':
                 rows=b['rows']
-                if doc:
-                    table=doc.add_table(rows=len(rows),cols=len(rows[0])); table.style='Table Grid'
-                    for row,cells in zip(table.rows,rows):
-                        for cell,text in zip(row.cells,cells): cell.text=text
-                else:
-                    fmt=lambda row:'| '+' | '.join(_md_text(c).replace('\n','<br>') for c in row)+' |'
-                    lines.append('\n'.join([fmt(rows[0]),fmt(['---']*len(rows[0])),*(fmt(r) for r in rows[1:])]))
+                fmt=lambda row:'| '+' | '.join(_md_text(c).replace('\n','<br>') for c in row)+' |'
+                lines.append('\n'.join([fmt(rows[0]),fmt(['---']*len(rows[0])),*(fmt(r) for r in rows[1:])]))
                 continue
             if b['kind']=='image':
                 asset=b['asset']; assets.add(asset)
-                if doc: doc.add_picture(io.BytesIO(archive.read(asset)),width=Pt(min(430,b['box'][2]-b['box'][0])))
-                else: lines.append(f"![图表，第 {page['source_page']} 页]({asset})")
+                lines.append(f"![图表，第 {page['source_page']} 页]({asset})")
                 for uri in b.get('links',[]):
-                    if doc:
-                        p=doc.add_paragraph(); r=p.add_run(uri); h=OxmlElement('w:hyperlink'); h.set(qn('r:id'),p.part.relate_to(uri,RT.HYPERLINK,is_external=True)); h.append(r._r); p._p.append(h)
-                    else: lines.append('<'+uri+'>')
+                    lines.append('<'+uri+'>')
                 continue
-            p=doc.add_paragraph(style={'heading':'Heading 2','caption':'Caption'}.get(b['kind'],'Normal')) if doc else None
             md=[]
             for s in b['runs']:
                 text=s['text']; flags=s['flags']; uri=s['uri']
                 if 'asset' in s:
                     asset=s['asset']; assets.add(asset)
-                    if doc: p.add_run().add_picture(io.BytesIO(archive.read(asset)),width=Pt(max(1,s['width'])))
-                    else: md.append(f'![原文字形]({asset})')
+                    md.append(f'![原文字形]({asset})')
                     continue
-                if doc:
-                    r=p.add_run(text); r.italic=bool(flags&2); r.bold=bool(flags&16)
-                    if flags&1: r.font.superscript=True
-                    elif s.get('subscript'): r.font.subscript=True
-                    if uri:
-                        h=OxmlElement('w:hyperlink'); h.set(qn('r:id'),p.part.relate_to(uri,RT.HYPERLINK,is_external=True)); h.append(r._r); p._p.append(h)
-                else:
-                    val=_md_text(text)
-                    if flags&1: val='<sup>'+html.escape(text)+'</sup>'
-                    elif s.get('subscript'): val='<sub>'+html.escape(text)+'</sub>'
-                    if flags&2: val='*'+val+'*'
-                    if flags&16: val='**'+val+'**'
-                    if uri: val='['+val+']('+quote(uri,safe=':/@?&=#%+;,')+')'
-                    md.append(val)
-            if not doc: lines.append(('## ' if b['kind']=='heading' else '')+''.join(md))
+                val=_md_text(text)
+                if flags&1: val='<sup>'+html.escape(text)+'</sup>'
+                elif s.get('subscript'): val='<sub>'+html.escape(text)+'</sub>'
+                if flags&2: val='*'+val+'*'
+                if flags&16: val='**'+val+'**'
+                if uri: val='['+val+']('+quote(uri,safe=':/@?&=#%+;,')+')'
+                md.append(val)
+            lines.append(('## ' if b['kind']=='heading' else '')+''.join(md))
         if manifest['issues'].get(str(page['source_page']-1)):
             note=f"原第 {page['source_page']} 页含未翻译区域，请对照此版本 PDF。"
-            if doc: doc.add_paragraph(note)
-            else: lines.append('> '+note)
-    if doc: doc.save(handle)
+            lines.append('> '+note)
+    text=('\n\n'.join(lines)+'\n').encode('utf8')
+    if packed:
+        with ZipFile(handle,'w',ZIP_DEFLATED) as out:
+            out.writestr('translation.md',text)
+            for name in sorted(assets): out.writestr(name,archive.read(name))
     else:
-        text=('\n\n'.join(lines)+'\n').encode('utf8')
-        if packed:
-            with ZipFile(handle,'w',ZIP_DEFLATED) as out:
-                out.writestr('translation.md',text)
-                for name in sorted(assets): out.writestr(name,archive.read(name))
-        else: handle.write(text)
+        handle.write(text)
 
 
 def export_file(identity, info, kind, destination):

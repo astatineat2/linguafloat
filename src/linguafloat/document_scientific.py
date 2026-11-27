@@ -662,53 +662,85 @@ def attach_measurement_nucleus(ti, text):
     return text
 
 
+_DECIMAL_PREFIX = re.compile(r'(?<![A-Za-z0-9_.])[-+\u2212]?\d+\.$')
+
+
+def _formula_boundaries(translate_input, placeholders):
+    """Classify boundaries from the source glyphs, not from translated punctuation."""
+    kinds = {}
+    for p in placeholders:
+        formula = p.formula
+        glyphs = ''.join(c.char_unicode or '' for c in formula.pdf_character) if formula else ''
+        if not glyphs.strip():
+            # Missing glyph data cannot establish that a former decimal is safe to move.
+            kinds[p.placeholder] = 'unknown'
+            continue
+        if (formula.y_offset or 0) > 0:
+            prefix = re.sub(r'<[^>]+>', '', translate_input.unicode.partition(p.placeholder)[0])
+            label = glyphs.strip()
+            if re.fullmatch(r'\d+(?:[,\u2013-]\d+)*', label) and re.search(r'\bet\s+al\.\s*[,;:]?\s*$', prefix, re.I):
+                kinds[p.placeholder] = 'author-citation'
+                continue
+            single_after_sentence = re.fullmatch(r'\d+', label) and re.search(
+                r'(?:[A-Za-z]{2,}\d*|\bv\d+(?:\.\d+)+)\.$', prefix, re.I)
+            if re.fullmatch(r'\d+(?:,\d+)+', label) or single_after_sentence:
+                kinds[p.placeholder] = 'citation'
+                continue
+        # A fractional continuation must start with a digit immediately after
+        # the point. Space or a letter starts a new token, not a decimal tail.
+        if re.match(r'\d', glyphs):
+            kinds[p.placeholder] = 'decimal'
+    return kinds
+
+
 def check_formula_tokens(translate_input, output):
+    return not _formula_boundary_problem(translate_input, output)
+
+
+def _formula_boundary_problem(translate_input, output):
     from babeldoc.format.pdf.document_il.midend.il_translator import FormulaPlaceholder
-    tokens = [p.placeholder for p in translate_input.placeholders if isinstance(p, FormulaPlaceholder)]
+    placeholders = [p for p in translate_input.placeholders if isinstance(p, FormulaPlaceholder)]
+    tokens = [p.placeholder for p in placeholders]
     if not tokens:
-        return True
+        return ''
     if any(_starts_identifier(output.partition(t)[2]) for t in _enzyme_prefixes(translate_input)):
-        return False
+        return '构型前缀后误接了编号而非酶名'
     if (re.search(r'[\u3400-\u9fff]',output) and _split_crystal_head(translate_input.unicode.partition(tokens[0])[0])
             and not _has_crystal_head(output)):
-        return False
+        return '跨公式重组后遗漏了晶体结构主语'
     pattern = re.compile("|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True)))
     unknown = set(re.findall(r"\{[vV]\d+\}", output)) - set(re.findall(r"\{[vV]\d+\}", translate_input.unicode))
     if unknown or pattern.findall(output) != pattern.findall(translate_input.unicode):
-        return False
-    citations = set()
-    for p in translate_input.placeholders:
-        if not isinstance(p, FormulaPlaceholder) or not p.formula or not (p.formula.y_offset or 0) > 0:
-            continue
-        glyphs = ''.join(c.char_unicode or '' for c in p.formula.pdf_character).strip()
-        prefix = re.sub(r'<[^>]+>', '', translate_input.unicode.partition(p.placeholder)[0])
-        if re.fullmatch(r'\d+(?:[,–-]\d+)*', glyphs) and re.search(r'\bet\s+al\.\s*[,;:]?\s*$', prefix, re.I):
-            citations.add(p.placeholder)
-            plain = re.sub(r'<[^>]+>', '', output)
-            before, _, after = plain.partition(p.placeholder)
+        return '重组后的公式标记丢失、增加或顺序变化'
+    kinds = _formula_boundaries(translate_input, placeholders)
+    plain = re.sub(r'<[^>]+>', '', output)
+    for token, kind in kinds.items():
+        if kind == 'author-citation':
+            before, _, after = plain.partition(token)
             if re.search(r'[将把取加用]\s*$', before) and re.match(r'\s*\d', after):
-                return False
-        single_after_sentence = (re.fullmatch(r'\d+',glyphs) and re.search(
-            r'(?:[A-Za-z]{2,}\d*|\bv\d+(?:\.\d+)+)\.$', prefix, re.I))
-        if re.fullmatch(r'\d+(?:,\d+)+', glyphs) or single_after_sentence:
-            citations.add(p.placeholder)
-    # A formula slot can contain only the fractional digits/unit. Keep the
-    # adjacent decimal prefix attached, even when a style closes in between.
-    def decimal_edges(text):
+                return '重组后引文上标错位'
+    # Compare only the source-derived number and citation links. Strip style
+    # tags here so that a closing tag cannot hide an adjacent decimal point.
+    def boundary_values(text):
         text = re.sub(r'<[^>]+>', '', text)
         edges = []
         previous_end = 0
         for m in pattern.finditer(text):
-            if m[0] in citations:
+            kind = kinds.get(m[0])
+            if kind in {'citation', 'author-citation'}:
                 # Citation placement is sentence-level. Chinese may move the
                 # identifier within this fragment, but not across its citation.
                 edges.append((m[0],prose_numbers(text[previous_end:m.start()])))
-            else:
-                prefix = re.search(r'(?<![A-Za-z0-9_.])([-+\u2212]?\d+\.)$', text[:m.start()])
-                edges.append((m[0], prefix[1] if prefix else None))
+            elif kind in {'decimal', 'unknown'}:
+                prefix = _DECIMAL_PREFIX.search(text, previous_end, m.start())
+                edges.append((m[0], prefix[0] if prefix else None))
             previous_end = m.end()
         return edges
-    return decimal_edges(translate_input.unicode) == decimal_edges(output)
+    for (token, expected), (_, actual) in zip(boundary_values(translate_input.unicode), boundary_values(output), strict=True):
+        if expected != actual:
+            return ('重组后引文上标前的数值边界改变' if kinds[token] in {'citation', 'author-citation'}
+                    else '重组后跨公式的小数边界改变')
+    return ''
 
 
 def prose_numbers(text):
@@ -910,18 +942,17 @@ def translate_formula_segments(translate_input, translator):
     """Reconstruct immutable formulas around translated, explicitly keyed prose."""
     from babeldoc.format.pdf.document_il.midend.il_translator import FormulaPlaceholder
     from linguafloat.document_core import DocumentError
-    tokens = [p.placeholder for p in translate_input.placeholders if isinstance(p, FormulaPlaceholder)]
+    placeholders = [p for p in translate_input.placeholders if isinstance(p, FormulaPlaceholder)]
+    tokens = [p.placeholder for p in placeholders]
     pattern = "(" + "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True)) + ")" if tokens else None
     pieces = re.split(pattern, translate_input.unicode) if pattern else [translate_input.unicode]
     # Some native formula runs include both the fraction and its unit. Keep
     # the integer and decimal point out of the model's movable prose.
     fixed_tails={}
-    native_fractions={p.placeholder for p in translate_input.placeholders if isinstance(p,FormulaPlaceholder)
-                      and p.formula and re.match(r'^\s*\d+\s*(?:cm|mm|nm|ppm|mg|mL|µm|μm)\b',
-                      ''.join(c.char_unicode or '' for c in p.formula.pdf_character))}
+    boundaries = _formula_boundaries(translate_input, placeholders)
     for i in range(1,len(pieces),2):
-        tail=re.search(r'(?<![A-Za-z0-9_.])[-+−]?\d+\.$',pieces[i-1])
-        if pieces[i] in native_fractions and tail:
+        tail = _DECIMAL_PREFIX.search(pieces[i - 1])
+        if boundaries.get(pieces[i]) == 'decimal' and tail:
             fixed_tails[i-1]=tail[0]
             pieces[i-1]=pieces[i-1][:tail.start()]
     fragments = [dict(id=i, input=text) for i, text in enumerate(pieces)
@@ -1109,9 +1140,9 @@ def translate_formula_segments(translate_input, translator):
     if missing_body_translation(translate_input.unicode, result, getattr(getattr(translator,'job',None),'target',None)):
         discard(messages)
         stop("正文整段未得到目标语言译文")
-    if not check_formula_tokens(translate_input, result):
+    if problem := _formula_boundary_problem(translate_input, result):
         discard(messages)
-        stop("重组后的公式标记丢失、增加或顺序变化")
+        stop(problem)
     checkpoint()
     if recovered and store is not None:
         store.put(translator.cache_key(messages), json.dumps(

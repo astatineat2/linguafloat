@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt, Signal
@@ -807,6 +809,9 @@ class MainWindow(QMainWindow):
 
     def _fit_work_area(self):
         if QApplication.platformName() != "windows" or self.isMaximized() or self.isFullScreen():
+            return
+        # Windows can deliver a resize before Qt updates its maximized state.
+        if ctypes.windll.user32.IsZoomed(wintypes.HWND(int(self.winId()))):
             return
         area = self.screen().availableGeometry()
         width = max(self.minimumWidth(), min(self.width(), area.width() - 24))
