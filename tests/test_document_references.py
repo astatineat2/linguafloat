@@ -19,6 +19,10 @@ from test_document_formats import FakeTranslator
 from linguafloat.document_worker import execute
 
 
+FIRST_CITATION = '[1] Smith, A. Phys. Rev. 12, 34-42 (2021).'
+SECOND_CITATION = '[2] Brown, B. Nature 442, 797 (2006).'
+
+
 @pytest.mark.parametrize("heading", ["References", "BIBLIOGRAPHY", "参考文献", "参考资料"])
 def test_heading_and_citations(heading):
     assert is_heading(heading)
@@ -89,8 +93,8 @@ def test_pdf_boundary_ignores_contents_and_preserves_appendix(tmp_path):
         body = doc.new_page()
         body.insert_text((40, 100), "Research paragraph with a citation [1].")
         body.insert_text((40, 300), "References")
-        body.insert_text((40, 330), "[1] First study")
-        body.insert_text((40, 348), "[2] Second study")
+        body.insert_text((40, 330), FIRST_CITATION)
+        body.insert_text((40, 348), SECOND_CITATION)
         doc.new_page().insert_text((40, 100), "Appendix A")
         doc.save(path)
     with fitz.open(path) as doc:
@@ -106,7 +110,7 @@ def test_pdf_boundary_ignores_contents_and_preserves_appendix(tmp_path):
     paths = assemble_layout_pdf(job, [0, 1, 2], rendered, tmp_path, {}, JobControl())
     with fitz.open(paths[0]) as mono, fitz.open(paths[1]) as dual:
         assert len(mono) == 3 and "TRANSLATED BODY" in mono[2].get_text()
-        assert "[1] First study" in mono[1].get_text()
+        assert FIRST_CITATION in mono[1].get_text()
         assert len(dual) == 3 and "TRANSLATED BODY" in dual[2].get_text()
 
 
@@ -223,8 +227,8 @@ def test_actual_ocr_finds_scanned_references_and_ignores_figure(tmp_path):
         page = digital.new_page(width=595, height=842)
         page.insert_text((45, 110), "Research text with citations [1] and [2].", fontsize=15)
         page.insert_text((45, 440), "References", fontsize=18)
-        page.insert_text((45, 475), "[1] Smith, Research article, Journal (2021).", fontsize=14)
-        page.insert_text((45, 506), "[2] Brown, Another article, Journal (2022).", fontsize=14)
+        page.insert_text((45, 475), FIRST_CITATION, fontsize=14)
+        page.insert_text((45, 506), SECOND_CITATION, fontsize=14)
         raster = page.get_pixmap(matrix=fitz.Matrix(2, 2)).tobytes("png")
         out = scanned.new_page(width=595, height=842)
         out.insert_image(out.rect, stream=raster)
@@ -305,8 +309,8 @@ def test_column_evidence_only_excludes_confirmed_margin_headers(monkeypatch, var
                 if variant == "body_crossing_heading":
                     page.insert_text((340, 340), "Research continues below the heading.")
                 page.insert_text((40, 300), "References")
-                page.insert_text((40, 330), "[1] First study")
-                page.insert_text((40, 350), "[2] Second study")
+                page.insert_text((40, 330), FIRST_CITATION)
+                page.insert_text((40, 350), SECOND_CITATION)
         if conflict:
             boundary = pdf_boundary(document, JobControl(), lambda _: None)
             if variant in {"body_above_heading", "body_crossing_heading"}:
@@ -357,8 +361,8 @@ def test_reading_pdf_skip_references_translates_prefix_and_appendix(tmp_path):
         page = source.new_page()
         page.insert_text((40, 100), "More research body text.")
         page.insert_text((40, 300), "References")
-        page.insert_text((40, 325), "[1] One article")
-        page.insert_text((40, 345), "[2] Another article")
+        page.insert_text((40, 325), FIRST_CITATION)
+        page.insert_text((40, 345), SECOND_CITATION)
         source.new_page().insert_text((40, 100), "Appendix A data and description.")
         source.save(source_path)
     counts = []
@@ -382,14 +386,14 @@ def test_reading_pdf_skip_references_translates_prefix_and_appendix(tmp_path):
         counts.append(translator.calls)
         assert any("Appendix A" in text for text in sent)
         if skip:
-            assert all("[1] One article" not in text and "[2] Another article" not in text
+            assert all(FIRST_CITATION not in text and SECOND_CITATION not in text
                        and "References" not in text for text in sent)
         output = events[-1]
         with fitz.open(output["outputs"][0]) as mono, fitz.open(output["outputs"][1]) as dual:
             assert "Appendix A" in mono[-1].get_text()
             assert "Appendix A" in dual[-1].get_text()
             if skip:
-                assert "[1] One article" in "".join(page.get_text() for page in mono)
+                assert FIRST_CITATION in "".join(page.get_text() for page in mono)
                 assert output["untranslated_regions"] == 0
                 assert output["reference_boundary"]["page"] == 1
     assert counts == [3, 3]
@@ -405,8 +409,8 @@ def test_running_reference_header_is_not_a_chapter(tmp_path):
             page.insert_text((40, 165), "[2] Another numbered example in the body")
             if index:
                 page.insert_text((40, 400), "References")
-                page.insert_text((40, 430), "[1] First reference")
-                page.insert_text((40, 455), "[2] Second reference")
+                page.insert_text((40, 430), FIRST_CITATION)
+                page.insert_text((40, 455), SECOND_CITATION)
         document.save(path)
     with fitz.open(path) as document:
         boundary = pdf_boundary(document, JobControl(), lambda _: None)
@@ -419,8 +423,8 @@ def test_actual_scan_flow_preserves_references_and_translates_appendix(tmp_path)
         page = digital.new_page()
         page.insert_text((45, 110), "The experiment measures magnetic field stability.", fontsize=14)
         page.insert_text((45, 440), "References", fontsize=18)
-        page.insert_text((45, 475), "[1] Smith, Research article, Journal (2021).", fontsize=14)
-        page.insert_text((45, 506), "[2] Brown, Another article, Journal (2022).", fontsize=14)
+        page.insert_text((45, 475), FIRST_CITATION, fontsize=14)
+        page.insert_text((45, 506), SECOND_CITATION, fontsize=14)
         digital.new_page().insert_text((45, 110), "Appendix supporting data.", fontsize=14)
         for page in digital:
             out = scan.new_page(width=page.rect.width, height=page.rect.height)

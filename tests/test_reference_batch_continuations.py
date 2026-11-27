@@ -20,6 +20,77 @@ def local_layout(monkeypatch):
                         lambda: SimpleNamespace(predict=lambda *a, **k: [prediction]))
 
 
+def test_heading_and_contiguous_numbers_do_not_protect_body_in_final_pdf(tmp_path):
+    from linguafloat.document_pdf import translate_reading_pdf
+    from test_document_core import job_for
+    from test_document_formats import FakeTranslator
+
+    path = tmp_path / 'numbered-body.pdf'
+    with fitz.open() as source:
+        page = source.new_page(width=420, height=400)
+        page.insert_text((40, 95), 'References')
+        page.insert_text((40, 125), '1. Measure the sample and record the temperature.')
+        page.insert_text((40, 155), '2. Repeat the measurements at each pressure.')
+        boundary = pdf_boundary(source, JobControl(), lambda _: None)
+        source.save(path)
+    job = job_for(path, pdf_mode='reading', skip_references=True)
+    job.reference_boundary = boundary or {}
+    translator = FakeTranslator(job)
+    sent = []
+    translate = translator.translate
+
+    def capture(text):
+        sent.append(text)
+        return translate(text)
+
+    translator.translate = capture
+    outputs, _ = translate_reading_pdf(job, translator, tmp_path, lambda _: None)
+    assert any('Measure the sample' in text for text in sent)
+    assert any('Repeat the measurements' in text for text in sent)
+    with fitz.open(outputs[1]) as dual:
+        assert '\u8bd1\u6587' in dual[0].get_text()
+
+
+@pytest.mark.parametrize('labels', [('', ''), ('[4] ', '[9] ')])
+def test_publication_metadata_protects_citations_without_title_or_sequential_labels(labels):
+    with fitz.open() as source:
+        page = source.new_page(width=430, height=420)
+        page.insert_text((40, 90), '12. References')
+        page.insert_text((40, 120), labels[0] + 'Smith, A. Phys. Rev. B 106, 014401 (2022).')
+        page.insert_text((40, 145), labels[1] + 'B. Jones, Nat. Phys. 19, 84-90 (2023).')
+        boundary = pdf_boundary(source, JobControl(), lambda _: None)
+        assert boundary
+        assert boundary_intersects(boundary, 0, page.search_for('014401')[0])
+        assert boundary_intersects(boundary, 0, page.search_for('84-90')[0])
+
+
+def test_numbered_prose_on_next_page_before_appendix_is_not_a_reference_continuation():
+    with fitz.open() as source:
+        page = source.new_page(width=440, height=460)
+        page.insert_text((40, 90), 'References')
+        page.insert_text((40, 120), '1. Smith, A. Phys. Rev. B 106, 014401 (2022).')
+        page.insert_text((40, 145), '2. B. Jones, Nat. Phys. 19, 84-90 (2023).')
+        page = source.new_page(width=440, height=460)
+        page.insert_text((40, 90), '3. Measure the sample at steady pressure.')
+        page.insert_text((40, 120), '4. Repeat the measurements.')
+        page.insert_text((40, 200), 'Appendix A', fontname='hebo', fontsize=14)
+        boundary = pdf_boundary(source, JobControl(), lambda _: None)
+        assert boundary and not reference_boxes(boundary, 1)
+
+
+def test_numbered_prose_after_confirmed_citations_in_same_column_is_not_protected():
+    with fitz.open() as source:
+        page = source.new_page(width=440, height=460)
+        page.insert_text((40, 90), 'References')
+        page.insert_text((40, 120), '1. Smith, A. Phys. Rev. B 106, 014401 (2022).')
+        page.insert_text((40, 145), '2. B. Jones, Nat. Phys. 19, 84-90 (2023).')
+        page.insert_text((40, 230), '3. Repeat the measurements at each pressure.')
+        boundary = pdf_boundary(source, JobControl(), lambda _: None)
+        assert boundary_intersects(boundary, 0, page.search_for('014401')[0])
+        assert boundary_intersects(boundary, 0, page.search_for('84-90')[0])
+        assert not boundary_intersects(boundary, 0, page.search_for('Repeat the measurements')[0])
+
+
 def _footer(page, number, y=763):
     # The source's running journal line alternates sides and spans the gutter.
     page.insert_text((42.52 if number % 2 == 0 else 256.89, y),
@@ -260,6 +331,28 @@ def test_ieee_bare_year_continues_with_original_citation_labels(monkeypatch, sca
         assert boundary and not boundary.get("uncertain_end")
         assert reference_page_only(boundary, 1)
         assert all(boundary_intersects(boundary, 1, box) for box in page.search_for("J. Smith"))
+
+
+@pytest.mark.parametrize("scanned", [False, True])
+@pytest.mark.parametrize("dated", [True, False])
+def test_journal_with_volume_issue_and_article_number_continues(monkeypatch, scanned, dated):
+    if scanned:
+        _ocr_rows(monkeypatch)
+    with _bifido(footer=False, fragment=False) as doc:
+        doc.delete_pages(1, 3)
+        page = doc.new_page(width=595.276, height=790.866)
+        for n, y in ((3, 60), (4, 100)):
+            year = " (2023)." if dated else "."
+            page.insert_text((40, y), f"{n}. Smith, A., & Lee, B.{year} A study.", fontsize=8)
+            page.insert_text((54, y + 12), "Rapid Research Letters, 17(6), 2200493.", fontsize=8)
+        following = doc.new_page()
+        following.insert_text((40, 65), "Appendix", fontname="hebo", fontsize=12)
+        following.insert_text((40, 89), "Independent material must remain translatable.", fontsize=10)
+        boundary = pdf_boundary(doc, JobControl(), lambda _: None)
+        assert reference_page_only(boundary, 1) is dated
+        assert not reference_page_only(boundary, 2)
+        for box in following.search_for("Independent material"):
+            assert not boundary_intersects(boundary, 2, box)
 
 
 @pytest.mark.parametrize("scanned", [False, True])

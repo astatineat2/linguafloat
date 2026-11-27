@@ -32,6 +32,31 @@ def test_reference_columns_and_number_boundaries(tmp_path):
     assert all(e["box"][0] > e["marker"][2] for e in entries)
 
 
+def test_numbered_body_sections_above_bibliography_stay_outside_reference_entries():
+    with fitz.open() as doc:
+        page = doc.new_page(width=500, height=400)
+        for number, y, heading in ((10, 40, 'Data Availability'), (11, 100, 'Keywords')):
+            page.insert_text((40, y), f'{number}. {heading}', fontsize=9)
+            page.insert_text((65, y+13), 'This body text must remain translatable.', fontsize=9)
+        page.insert_text((40, 160), '12. References', fontsize=9)
+        for number, y in ((1, 185), (2, 235)):
+            page.insert_text((40, y), f'{number}. Smith, A., Results. Nature 8, 22 (2020).', fontsize=9)
+        assert [entry['number'] for entry in reference_entries(page)] == ['1.', '2.']
+
+
+def test_reference_relayout_checks_publication_content_even_on_confirmed_continuation():
+    with fitz.open() as doc:
+        page = doc.new_page(width=500, height=400)
+        for number, y, text in (
+            (10, 60, 'Smith, A. Phys. Rev. B 106, 014401 (2022).'),
+            (11, 95, 'Repeat the measurements at each pressure.'),
+            (12, 135, 'J. Lee, Nat. Phys. 19, 84-90 (2023).'),
+        ):
+            page.insert_text((40, y), f'{number}.', fontsize=9)
+            page.insert_text((65, y), text, fontsize=9)
+        assert [entry['number'] for entry in reference_entries(page, True)] == ['10.', '12.']
+
+
 def paragraph_fixture():
     from babeldoc.format.pdf.document_il import Box, PdfCharacter, PdfParagraph, PdfParagraphComposition, PdfStyle, PdfLine
     chars = []
@@ -41,6 +66,20 @@ def paragraph_fixture():
     paragraph = PdfParagraph(box=Box(0, 30, 70, 40), pdf_style=PdfStyle(font_id="body", font_size=9),
         unicode="".join(c.char_unicode for c in chars), pdf_paragraph_composition=[PdfParagraphComposition(pdf_line=PdfLine(pdf_character=chars))])
     return paragraph, chars
+
+
+def test_decimal_wrap_guard_joins_native_and_translated_units_without_marking_citations():
+    from linguafloat.document_layout import keep_decimal_units_together
+
+    def unit(text=None, native=None, citation=False):
+        formula = (NS(pdf_character=[NS(char_unicode=c) for c in native],
+                      pdf_curve=[], pdf_form=[], is_corner_mark=citation) if native else None)
+        return NS(try_get_unicode=lambda: text, formular=formula, can_break_line_cache=None)
+
+    units = [unit(' '), unit(native=' = 0'), unit('.'), unit(native='5 nm'), unit(' '),
+             unit('7'), unit('.'), unit(native='12', citation=True)]
+    keep_decimal_units_together(units)
+    assert [u.can_break_line_cache for u in units] == [None, False, False, False, None, None, None, None]
 
 
 def test_mapped_math_font_and_subscripts_keep_original_glyph_ids():

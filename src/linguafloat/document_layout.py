@@ -43,6 +43,25 @@ def keep_email_units_together(units):
     return addresses
 
 
+def keep_decimal_units_together(units):
+    """Use the layout look-ahead even when a decimal crosses a formula boundary."""
+    chunks, owners = [], []
+    for index, unit in enumerate(units):
+        text = unit.try_get_unicode()
+        formula = unit.formular
+        if (not text and formula and not formula.is_corner_mark
+                and not (formula.pdf_curve or formula.pdf_form)):
+            text = ''.join(c.char_unicode or '' for c in formula.pdf_character)
+        text = text or '\ufffc'
+        chunks.append(text)
+        owners.extend([index] * len(text))
+    for match in re.finditer(r'(?<![A-Za-z0-9_.])[-+\u2212]?\d+\.\d+', ''.join(chunks)):
+        start, end = owners[match.start()], owners[match.end()-1]
+        if start != end:
+            for unit in units[start:end+1]:
+                unit.can_break_line_cache = False
+
+
 def emails_fit_lines(placed, addresses):
     from itertools import groupby
     lines = [''.join(u.try_get_unicode() or '\ufffc' for u in group)
@@ -474,6 +493,7 @@ class LayoutPolicy:
         if not paragraph.box:
             raise DocumentError(f"[PDF 段落缺少坐标] 原始第 {page.page_number + 1} 页，无法安全排版。")
         units = self.normalize_dropcap(units, paragraph, page) if apply_layout else units
+        keep_decimal_units_together(units)
         addresses = keep_email_units_together(units) if '@' in (paragraph.unicode or '') else []
         original = self.original_boxes.get(id(paragraph), paragraph.box)
         obstacles = self.obstacles(page, paragraph)

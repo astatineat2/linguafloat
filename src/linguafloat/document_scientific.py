@@ -46,12 +46,23 @@ def reference_title(text):
 
 def reference_entries(page, in_references=False):
     import pymupdf as fitz
+    from linguafloat.document_references import _bibliographic_entry, _digital_lines, _reference_column_split, is_heading
+
     words = page.get_text("words")
     vocabulary = {unicodedata.normalize("NFKC", w[4]).strip(".,;:()[]\"'").casefold() for w in words}
-    headings = page.search_for("References") + page.search_for("REFERENCES")
+    lines = _digital_lines(page)
+    headings = [r["box"] for r in lines if r["horizontal"] and is_heading(r["text"])]
     if not headings and not in_references:
         return []
     anchors = [w for w in words if re.fullmatch(r"\[\d{1,3}\]|\d{1,3}\.", w[4]) and w[7] == 0]
+    if headings:
+        split = _reference_column_split(lines, page)
+
+        def order(box, *, bottom=False):
+            return (split is not None and box[0] >= split, box[3 if bottom else 1])
+
+        start = min(order(box, bottom=True) for box in headings)
+        anchors = [w for w in anchors if order(w) >= start]
     columns = []
     for word in sorted(anchors, key=lambda w: (w[0], w[1])):
         # Publishers align either edge of the marker column. A second digit
@@ -65,9 +76,6 @@ def reference_entries(page, in_references=False):
     entries = []
     for column in sorted(columns, key=lambda c: min(w[0] for w in c)):
         column.sort(key=lambda w: w[1])
-        numbers = [int(re.sub(r"\D", "", w[4])) for w in column]
-        if len(column) < 2 or any(b != a + 1 for a, b in zip(numbers, numbers[1:])):
-            continue
         x0 = column[0][0]
         x1 = min((c[0][0] - 8 for c in columns if c[0][0] > x0 + 80), default=page.rect.width - 18)
         for i, anchor in enumerate(column):
@@ -101,7 +109,8 @@ def reference_entries(page, in_references=False):
                     token = combined if combined.strip(".,;:()[]\"'").casefold() in vocabulary else before + token
                 tokens.append((token, (word[5], word[6])))
             text = " ".join(token for token, _ in tokens)
-            entries.append(dict(number=anchor[4], marker=list(anchor[:4]), box=list(box), text=text))
+            if _bibliographic_entry(text):
+                entries.append(dict(number=anchor[4], marker=list(anchor[:4]), box=list(box), text=text))
     return entries
 
 
@@ -201,6 +210,16 @@ def join_partial_scientific_tokens(paragraph):
                  and (c.pdf_style.font_size or 0) >= size*.85]
         if bases and max(bases)-min(bases) > size*.4:
             continue  # Paint order alone cannot join tokens across lines/columns.
+        # A raised reference after a regular word is not the numeric suffix
+        # of an identifier. Leave the prose translatable and retain the glyphs.
+        word_number = re.fullmatch(r'([A-Z]?[a-z]{2,})(\d{1,3})', match[0])
+        if bases and word_number and word_number[1].lower() not in {'sin', 'cos', 'tan', 'exp', 'log', 'ln'}:
+            scripts = [c for i in formulas for c in composition_chars(atoms[i])
+                       if (c.char_unicode or '').strip()]
+            if scripts and all(c.char_unicode.isdigit() and c.pdf_style and c.box
+                               and (c.pdf_style.font_size or size) < size*.85
+                               and c.box.y-max(bases) >= size*.15 for c in scripts):
+                continue
         if size and any(b.box.x-a.box.x2 > size*1.5 or b.box.x < a.box.x-size*.25
                         for a, b in zip(painted, painted[1:])):
             continue
@@ -696,12 +715,12 @@ def prose_numbers(text):
     """Count every prose value, including both ends of a hyphenated range."""
     from collections import Counter
     from decimal import Decimal
-    from linguafloat.document_context import normalize_numeric_ranges
+    from linguafloat.document_context import normalize_numeric_ranges, separate_dotted_cross_references
     text = re.sub(r'\{[vV]\d+\}', ' ', re.sub(r'<[^>]+>', '', text))
     # Both adjoining bonds are required: a signed measurement or a numeric
     # range is not a lexical locant such as word-3-acid.
     text = re.sub(r'(?<=[A-Za-z㐀-鿿])-(?=\d+\s*[-‐‑]\s*[A-Za-z㐀-鿿])', ' ', text)
-    text = normalize_numeric_ranges(text)
+    text = normalize_numeric_ranges(separate_dotted_cross_references(text))
     pattern = r'([-+−]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+−]?\d+)?)(\s*[%％])?'
     return Counter((Decimal(value.replace('−', '-')), bool(percent))
                    for value, percent in re.findall(pattern, text))

@@ -135,6 +135,22 @@ def test_contiguous_identifier_suffix_stays_part_of_identifier():
                         for part in p.pdf_paragraph_composition if part.pdf_formula]
 
 
+@pytest.mark.parametrize('word', ['measurements', 'contributes', 'by'])
+def test_raised_citation_does_not_make_the_preceding_word_immutable(word):
+    text = f'Using {word}43 in this study.'
+    p, chars = paragraph(text, '43')
+    for c in chars[text.index('43'):text.index('43')+2]:
+        c.pdf_style.font_size = 6
+        c.box.y += 2
+        c.box.y2 += 2
+    protect_math(p, {'body': 'TimesRoman'})
+    parts = p.pdf_paragraph_composition
+    assert [''.join(c.char_unicode for c in part.pdf_formula.pdf_character).strip()
+            for part in parts if part.pdf_formula] == ['43']
+    assert word in ''.join(c.char_unicode for part in parts if not part.pdf_formula for c in composition_chars(part))
+    assert [id(c) for part in parts for c in composition_chars(part)] == [id(c) for c in chars]
+
+
 @pytest.mark.parametrize('shift', [-2, 2])
 def test_script_before_visual_word_gap_does_not_absorb_prose(shift):
     p, chars=paragraph('AraT5was active.','5')
@@ -221,6 +237,16 @@ def test_chemical_locant_is_not_a_negative_reading():
     assert prose_numbers('value -3.5%') != prose_numbers('值3.5%')
     assert prose_numbers('indole-3- acetic acid') == prose_numbers('\u5422\u54da-3-\u4e59\u9178')
     assert prose_numbers('value -3- acid') != prose_numbers('value 3- acid')
+
+
+@pytest.mark.parametrize('label', ['Figure', 'Fig', 'Table', 'Eq', 'Equation'])
+def test_dotted_cross_reference_is_not_a_leading_decimal(label):
+    from linguafloat.document_scientific import _formula_fragment_problem as problem
+    source = f'As shown in {label}.2a, the thickness is .25 nm.'
+    target = '\u89c1\u56fe 2a\uff0c\u539a\u5ea6\u4e3a 0.25 nm\u3002'
+    assert not problem(source, target, [])
+    assert problem(source, target.replace('2a', '3a'), [])
+    assert problem(source, target.replace('0.25', '0.2'), [])
 
 
 @pytest.mark.parametrize('source,translation', [

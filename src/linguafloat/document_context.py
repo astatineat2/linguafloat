@@ -206,13 +206,18 @@ def normalize_numeric_ranges(text):
     return re.sub(pattern, lambda m: m[1] + '\u2013', text)
 
 
+def separate_dotted_cross_references(text):
+    """Separate punctuation in labels like Figure.2a from genuine leading decimals."""
+    return re.sub(r'\b(fig(?:ure)?s?|tab(?:le)?s?|eq(?:uation)?s?)\.(?=\d)', r'\1. ', text, flags=re.I)
+
+
 def scientific_quantities(text):
     """Conservative guard for decimal, exponent and percent values, not all prose digits."""
-    text = normalize_numeric_ranges(text)
+    text = normalize_numeric_ranges(separate_dotted_cross_references(text))
     values = []
     # Unicode \w includes Han: a translated value need not have an ASCII
     # space before it. Keep identifier/decimal boundaries and the sign intact.
-    for match in re.finditer(r"(?<![A-Za-z0-9_.+\u2212-])[-+\u2212]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?:\s*[%\uff05])?", text):
+    for match in re.finditer(r"(?<![A-Za-z0-9_.+\u2212-])[-+\u2212]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?(?:\s*[%\uff05])?", text):
         token = match[0].replace("\u2212", "-").replace("\uff05", "%").replace(" ", "")
         if "." in token or "e" in token.lower() or "%" in token:
             values.append((Decimal(token.rstrip("%")), token.endswith("%")))
