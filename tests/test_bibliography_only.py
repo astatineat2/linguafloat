@@ -7,6 +7,10 @@ from linguafloat.document_core import JobControl
 from linguafloat.document_references import pdf_boundary, boundary_intersects, reference_page_only, retain_pdf_tail
 
 
+FIRST_ENTRY = "[1] A. Author, J. Phys. 45, 100 (2020)."
+SECOND_ENTRY = "[2] B. Author, J. Phys. 46, 200 (2021)."
+
+
 @pytest.fixture
 def local_layout(monkeypatch):
     from babeldoc.docvision.doclayout import OnnxModel
@@ -36,7 +40,7 @@ def test_references_end_on_same_page_preserve_original_pixels(local_layout):
     with fitz.open() as doc, fitz.open() as rendered:
         page = doc.new_page()
         for y, text in [(100, "Research body"), (250, "References"),
-                        (280, "[1] First reference"), (300, "[2] Second reference"),
+                        (280, FIRST_ENTRY), (300, SECOND_ENTRY),
                         (400, "Appendix A"), (430, "Methods for the appendix")]:
             page.insert_text((40, y), text)
         boundary = pdf_boundary(doc, JobControl(), lambda _: None)
@@ -72,8 +76,8 @@ def test_unknown_column_conflict_retains_only_uncertain_page(local_layout):
         page = doc.new_page()
         page.insert_text((340, 150), "Other column body must not be lost.")
         page.insert_text((40, 300), "References")
-        page.insert_text((40, 330), "[1] First study")
-        page.insert_text((40, 350), "[2] Second study")
+        page.insert_text((40, 330), FIRST_ENTRY)
+        page.insert_text((40, 350), SECOND_ENTRY)
         doc.new_page().insert_text((40, 100), "Appendix A")
         boundary = pdf_boundary(doc, JobControl(), lambda _: None)
         assert boundary["uncertain_pages"] == [0]
@@ -88,8 +92,8 @@ def test_reading_appendix_request_and_order(local_layout, tmp_path):
     source = tmp_path / "source.pdf"
     with fitz.open() as doc:
         page = doc.new_page()
-        for y, text in [(80, "Research body"), (200, "References"), (230, "[1] First study"),
-                        (250, "[2] Second study"), (400, "Appendix A"), (430, "Extra methods")]:
+        for y, text in [(80, "Research body"), (200, "References"), (230, FIRST_ENTRY),
+                        (250, SECOND_ENTRY), (400, "Appendix A"), (430, "Extra methods")]:
             page.insert_text((40, y), text)
         doc.save(source)
         boundary = pdf_boundary(doc, JobControl(), lambda _: None)
@@ -99,7 +103,7 @@ def test_reading_appendix_request_and_order(local_layout, tmp_path):
     paths, _ = translate_reading_pdf(job, translator, tmp_path, lambda _: None)
     with fitz.open(paths[0]) as mono:
         assert len(mono) == 3
-        assert "[1] First study" in mono[1].get_text()
+        assert FIRST_ENTRY in mono[1].get_text()
         assert translator.calls == 2
 
 
