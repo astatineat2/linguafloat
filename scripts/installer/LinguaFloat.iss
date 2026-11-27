@@ -91,7 +91,9 @@ ConfirmUninstall=是否卸载 LinguaFloat？%n%n仅移除安装程序登记的�
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "可选快捷方式"; Flags: unchecked
 
 [Files]
-Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PayloadDir}\*"; Excludes: "\LinguaFloat.exe,\VERSION.txt"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PayloadDir}\LinguaFloat.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\VERSION.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\LinguaFloat"; Filename: "{app}\LinguaFloat.exe"; WorkingDir: "{app}"
@@ -102,6 +104,25 @@ Name: "{autodesktop}\LinguaFloat"; Filename: "{app}\LinguaFloat.exe"; WorkingDir
 Filename: "{app}\LinguaFloat.exe"; Description: "启动 LinguaFloat"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+var
+  SetupGate: THandle;
+
+function CreateFileW(Name: String; Access, Share: Cardinal; Security: LongWord;
+  Disposition, Attributes: Cardinal; Template: THandle): THandle;
+  external 'CreateFileW@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+function ShowWindow(Handle: HWND; CmdShow: Integer): Boolean;
+  external 'ShowWindow@user32.dll stdcall';
+
+procedure ReleaseSetupGate;
+begin
+  if SetupGate <> 0 then begin
+    CloseHandle(SetupGate);
+    SetupGate := 0;
+  end;
+end;
+
 procedure ChooseInstallDirectory(Sender: TObject);
 var
   Directory: String;
@@ -213,15 +234,90 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  Running: String;
+  Target, Running, GatePath, Marker, App, Previous: String;
+  WasIncomplete, Parked: Boolean;
 begin
-  Result := ValidateTarget(WizardDirValue);
+  Target := WizardDirValue;
+  Result := ValidateTarget(Target);
   if Result <> '' then Exit;
-  Running := RunningInTarget(WizardDirValue);
+  if not DirExists(Target) and not ForceDirectories(Target) then begin
+    Result := '无法创建安装目录。';
+    Exit;
+  end;
+  GatePath := AddBackslash(Target) + '.linguafloat-setup.lock';
+  SetupGate := CreateFileW(GatePath, $40000000, 0, 0, 4, $80, 0);
+  if SetupGate = THandle(-1) then begin
+    SetupGate := 0;
+    Result := '此目录已有安装正在进行，或无法锁定目录。';
+    Exit;
+  end;
+  Running := RunningInTarget(Target);
   if Running = '#check-failed' then
     Result := '无法核实安装目录中的运行进程。为避免覆盖正在处理的文件，请退出程序后重试；仍有问题时请保留安装日志。'
   else if Running <> '' then
     Result := '安装目录中仍有程序运行：' + Running + '。请先保存任务并通过托盘退出 LinguaFloat，再重试。安装程序不会强行结束任务。';
+  if Result <> '' then begin
+    ReleaseSetupGate;
+    DeleteFile(GatePath);
+    Exit;
+  end;
+  Marker := AddBackslash(Target) + '.linguafloat-setup-incomplete';
+  App := AddBackslash(Target) + 'LinguaFloat.exe';
+  Previous := AddBackslash(Target) + 'LinguaFloat.update-previous.bak';
+  WasIncomplete := FileExists(Marker);
+  Parked := False;
+  if not SaveStringToFile(Marker, '{#AppVersion}', False) then
+    Result := '无法记录安装状态，未替换程序。'
+  else if FileExists(App) and not (WasIncomplete and FileExists(Previous)) then begin
+    { Copy then delete: Windows shortcuts can follow the old EXE if it is moved. }
+    if FileCopy(App, Previous, True) then begin
+      Parked := DeleteFile(App);
+      if not Parked then DeleteFile(Previous);
+    end;
+    if not Parked then
+      Result := '无法停用旧版启动入口。请从托盘退出 LinguaFloat，再重试。'
+    else if RunningInTarget(Target) <> '' then
+      Result := '准备安装期间程序被打开，未替换组件。请退出后重试。';
+  end;
+  if Result <> '' then begin
+    if Parked then
+      if not RenameFile(Previous, App) then
+        WasIncomplete := True;
+    if not WasIncomplete then DeleteFile(Marker);
+    ReleaseSetupGate;
+    DeleteFile(GatePath);
+    Exit;
+  end;
+  if WizardSilent and (CompareText(ExtractFileName(ExpandConstant('{srcexe}')), 'Setup.exe') = 0) then
+    ShowWindow(WizardForm.Handle, 4);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Registered: String;
+begin
+  if CurStep <> ssPostInstall then Exit;
+#ifdef HasSetupReceipt
+#include "VerifyPayload.iss"
+#endif
+  if not RegQueryStringValue(HKCU64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{{#ProductGuid}}_is1', 'DisplayVersion', Registered) or
+     (Registered <> '{#AppVersion}') then
+    RaiseException('未确认 Windows 安装登记已更新。请用官方 Setup 原地修复。');
+  if not DeleteFile(ExpandConstant('{app}\.linguafloat-setup-incomplete')) then
+    RaiseException('无法清除安装未完成记录。请用官方 Setup 原地修复。');
+  if not WizardSilent then begin
+    ReleaseSetupGate;
+    DeleteFile(ExpandConstant('{app}\.linguafloat-setup.lock'));
+  end;
+  DeleteFile(ExpandConstant('{app}\LinguaFloat.update-previous.bak'));
+end;
+
+procedure DeinitializeSetup;
+begin
+  if SetupGate <> 0 then begin
+    ReleaseSetupGate;
+    DeleteFile(AddBackslash(WizardDirValue) + '.linguafloat-setup.lock');
+  end;
 end;
 
 function InitializeUninstall(): Boolean;

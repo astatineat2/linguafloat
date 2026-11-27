@@ -27,6 +27,7 @@ def run(compiler, assets):
         template = Path(__file__).parent / 'installer/LinguaFloat.iss'
         shutil.copyfile(template, root / template.name)
         shutil.copyfile(Path(os.environ['WINDIR'])/'System32/whoami.exe', payload/'LinguaFloat.exe')
+        (payload/'runtime.dat').write_bytes(b'QA runtime fixture')
         flags = ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/TASKS=!desktopicon', '/GROUP='+group]
         marker = target / 'my-paper.pdf'
         data = b'%PDF-reader-owned'

@@ -1550,7 +1550,10 @@ def run() -> int:
         controller.start()
         if health_directory is not None:
             from linguafloat.update_install import mark_healthy
-            QTimer.singleShot(2000, lambda: mark_healthy(health_directory, __version__, Path(sys.executable).resolve().parent))
+            def acknowledge_visible_window():
+                if controller.window.isVisible():
+                    mark_healthy(health_directory, __version__, Path(sys.executable).resolve().parent)
+            QTimer.singleShot(2000, acknowledge_visible_window)
         application.aboutToQuit.connect(controller.hotkey.stop)
         application.aboutToQuit.connect(controller.input_hotkey.stop)
         application.aboutToQuit.connect(controller.right_click.stop)

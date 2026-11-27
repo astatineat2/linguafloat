@@ -352,12 +352,14 @@ class HelpController(QObject):
                 or self.app.thread_pool.activeThreadCount() or self.app.capture._pending or self.app._input_pending):
             return
         self.timer.stop()
+        intent = None
         try:
             if not self.app.window.confirm_discard():
                 self.cancel_action()
                 return
             target = Path(sys.executable).resolve().parent
             from linguafloat.update_install import check_setup_target
+            from linguafloat.setup_gate import INTENT, clear_intent
             if not self.release.setup:
                 raise UpdateError('安装版只接受已签名清单中的 Windows Setup，不会用 ZIP 替换当前安装。')
             check_setup_target(target)
@@ -369,13 +371,18 @@ class HelpController(QObject):
                 raise UpdateError("更新信息已变化，请重新检查。")
             (self.job / "update.json").write_bytes(payload)
             (self.job / "update.json.sig").write_bytes(signature)
+            nonce = uuid.uuid4().hex
             atomic_json(self.job / "request.json", {"target": str(target), "current": __version__,
-                        "parent_pid": os.getpid(), "nonce": uuid.uuid4().hex})
+                        "parent_pid": os.getpid(), "nonce": nonce})
             atomic_json(self.job / "state.json", {"phase": "prepared", "target": str(target)})
             outside_helper = self.job / "LinguaFloatUpdater.exe"
             shutil.copy2(helper, outside_helper)
+            atomic_json(target / INTENT, {"nonce": nonce, "created": time.time()})
+            intent = (target, nonce)
             subprocess.Popen([str(outside_helper), "--job", str(self.job)], cwd=self.job, creationflags=0x08000000)
         except Exception as exc:
+            if intent:
+                clear_intent(*intent)
             self.install_pending = False
             self.app._update_waiting = False
             self.app.documents.update_pending = False

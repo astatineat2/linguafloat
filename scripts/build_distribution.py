@@ -12,12 +12,16 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import sys
 import time
 import tomllib
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'src'))
+from linguafloat.setup_gate import CRITICAL_FILES, RECEIPT
+
 TOP_LEVEL = {
     "LinguaFloat.exe", "LinguaFloatUpdater.exe", "_internal", "document-runtime",
     "LICENSES", "help", "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md",
@@ -93,6 +97,16 @@ def theme_assets(payload: Path, target: Path, version: str) -> None:
     small_image.save(target / "wizard-small.bmp")
 
 
+def write_setup_verification(payload: Path, installer: Path, version: str) -> None:
+    checksums = {name: digest(payload / name) for name in CRITICAL_FILES}
+    write_json(payload / RECEIPT, dict(version=version, files=checksums))
+    verified = list(checksums.items()) + [(RECEIPT, digest(payload / RECEIPT))]
+    (installer / 'VerifyPayload.iss').write_text(''.join(
+        f"  if GetSHA256OfFile(ExpandConstant('{{app}}\\{name.replace('/', chr(92))}')) <> '{checksum}' then\n"
+        f"    RaiseException('Failed to verify installed component: {name}');\n"
+        for name, checksum in verified), encoding='ascii')
+
+
 def make_distribution(source: Path, output: Path, build: int, level: int, *, internal_zip=False) -> None:
     source, output = source.resolve(), output.resolve()
     if output == source or source in output.parents:
@@ -117,11 +131,14 @@ def make_distribution(source: Path, output: Path, build: int, level: int, *, int
     installer = output / "build-input/installer"
     installer.mkdir()
     theme_assets(payload, installer, version)
+    if not internal_zip:
+        write_setup_verification(payload, installer, version)
     script_dir = Path(__file__).parent / "installer"
     for name in ("LinguaFloat.iss", "README.md"):
         shutil.copy2(script_dir / name, installer / name)
     (installer / "Build.iss").write_text(
         f'#define AppVersion "{version}"\n#define DistributionBuild "{build}"\n'
+        + ('#define HasSetupReceipt\n' if not internal_zip else '') +
         '#define PayloadDir "..\\LinguaFloat"\n#define DistOutput "..\\.."\n'
         '#include "LinguaFloat.iss"\n', encoding="utf-8-sig")
     shutil.copy2(Path(__file__), output / "build-input/build_distribution.py")

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from linguafloat.update_core import (UpdateError, atomic_json, check_archive, load_channel,
                                     parse_manifest, update_directory)
+from linguafloat.setup_gate import INCOMPLETE, clear_intent, offer_repair, verify_payload
 
 
 def check_target_path(target: Path) -> None:
@@ -34,13 +35,15 @@ def check_portable_folder(target: Path) -> None:
         raise UpdateError(f"安装目录含非程序文件，未进行替换：{target}。请将完整便携包解压到单独的文件夹。")
 
 
-def check_setup_target(target: Path) -> None:
+def check_setup_target(target: Path, version: str | None = None) -> None:
     import winreg
     check_target_path(target)
     key = r'Software\Microsoft\Windows\CurrentVersion\Uninstall\{7AB27613-3319-49B5-A2EB-796458D9C0F6}_is1'
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as entry:
             location = Path(winreg.QueryValueEx(entry, 'InstallLocation')[0])
+            if version is not None and winreg.QueryValueEx(entry, 'DisplayVersion')[0] != version:
+                raise UpdateError('Windows 安装登记的版本不匹配，未启动程序。')
     except OSError as exc:
         raise UpdateError('此程序不是当前用户登记的 Setup 安装版，未启动更新。') from exc
     if not location.is_absolute() or location.resolve() != target or not (target / 'LinguaFloat.exe').is_file():
@@ -201,6 +204,42 @@ def rollback(directory: Path, state: dict, *, relaunch=True) -> None:
         launch_application(target)
 
 
+def install_setup(directory, target, archive, request, release, launch, health_timeout):
+    state_path = directory / 'state.json'
+    state = dict(phase='setup_running', target=str(target), version=release.version, nonce=request['nonce'])
+    atomic_json(state_path, state)
+    try:
+        result = subprocess.run([str(archive), '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
+                                 '/SP-', '/NOCLOSEAPPLICATIONS', '/DIR=' + str(target),
+                                 '/LOG=' + str(directory / 'setup.log')], cwd=directory)
+        if result.returncode:
+            raise UpdateError(f'Setup 未完成（返回码 {result.returncode}）。请在原目录修复，不要先卸载。')
+        check_setup_target(target, release.version)
+        if (target / INCOMPLETE).exists():
+            raise UpdateError('Setup 尚有未完成记录，不能启动程序。')
+        verify_payload(target, release.version)
+    except (OSError, UpdateError):
+        atomic_json(state_path, dict(state, phase='setup_failed'))
+        raise
+    state['phase'] = 'setup_installed'
+    atomic_json(state_path, state)
+    try:
+        process = launch(target, directory)
+        state['child_pid'] = process.pid
+        deadline = time.monotonic() + health_timeout
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            if healthy(directory, state):
+                atomic_json(state_path, dict(state, phase='committed'))
+                return
+            time.sleep(.25)
+    except OSError:
+        pass
+    atomic_json(state_path, dict(state, phase='restart_failed'))
+    raise UpdateError('安装已完成，但未能确认自动打开。请从开始菜单打开 LinguaFloat，无需重装。')
+
+
 def install(directory: Path, *, recover=False, launch=launch_application, health_timeout=60) -> None:
     request = load_request(directory)
     target = Path(request["target"])
@@ -242,16 +281,10 @@ def install(directory: Path, *, recover=False, launch=launch_application, health
         if shutil.disk_usage(target.parent).free < release.unpacked_size + 128 * 1024**2:
             raise UpdateError("安装盘空间不足，当前程序未更改。")
         if release.setup:
-            result = subprocess.run([str(archive), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
-                                     '/SP-', '/NOCLOSEAPPLICATIONS', '/DIR=' + str(target),
-                                     '/LOG=' + str(directory / 'setup.log')], cwd=directory)
-            if result.returncode:
-                raise UpdateError(f'Setup 未完成（返回码 {result.returncode}），请查看安装日志。')
-            check_setup_target(target)
-            if (target / 'VERSION.txt').read_text(encoding='utf-8').splitlines()[0] != f'LinguaFloat v{release.version}':
-                raise UpdateError('Setup 结束，但原目录的版本不匹配，未启动程序。')
-            launch(target)
-            atomic_json(state_path, dict(phase='committed', target=str(target), version=release.version))
+            try:
+                install_setup(directory, target, archive, request, release, launch, health_timeout)
+            finally:
+                clear_intent(target, request['nonce'])
             return
         staging = target.parent / (".LinguaFloat-stage-" + directory.name)
         backup = target.parent / "LinguaFloat-backups" / (f"v{request['current']}-" + directory.name)
@@ -340,22 +373,34 @@ def main() -> int:
         install(args.job, recover=args.recover)
         return 0
     except Exception as exc:
+        try:
+            request = load_request(args.job)
+            clear_intent(Path(request['target']), request['nonce'])
+        except (OSError, ValueError, TypeError, KeyError, UpdateError):
+            pass
         message = str(exc) if isinstance(exc, (UpdateError, OSError)) else "更新助手遇到错误，旧版备份及恢复记录仍保留。"
+        title = "LinguaFloat 更新未完成"
+        state = {}
         try:
             state = json.loads((args.job / "state.json").read_text(encoding="utf-8"))
-            if state.get("phase") == "rolled_back":
+            if state.get("phase") == "restart_failed":
+                title = "LinguaFloat 已安装，未自动打开"
+            elif state.get("phase") == "rolled_back":
                 message = "更新未完成，已恢复旧版程序。\n原因：" + message
             else:
                 message = "更新未完成。\n原因：" + message
         except (OSError, ValueError):
             message = "更新未完成，未确认替换成功。\n原因：" + message
-        message += "\n恢复记录：" + str(args.job) + "\n请保留备份，检查原因后重试；不要混用不同版本依赖。"
+        message += "\n记录位置：" + str(args.job)
         try:
             atomic_json(args.job / "error.json", {"message": message})
         except OSError:
             pass
         if os.name == "nt":
-            ctypes.windll.user32.MessageBoxW(None, message, "LinguaFloat 更新未完成", 0x10)
+            if state.get('phase') == 'setup_failed':
+                offer_repair(Path(state['target']), state['version'], message)
+            else:
+                ctypes.windll.user32.MessageBoxW(None, message, title, 0x30)
         return 1
 
 
